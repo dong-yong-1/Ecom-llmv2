@@ -13,17 +13,11 @@
 - 训练启动封装：`/Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_sft.sh`
 - LoRA 消融：`/Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablation.py`
 
-当前 uv 环境已经安装：
+当前推荐环境策略：
 
-- `trl==1.1.0`
-- `peft==0.18.1`
-- `datasets==4.8.4`
-- `transformers==5.5.3`
-- `accelerate==1.13.0`
-
-虚拟环境位置：
-
-`/Users/dongyong/Project/Trea_code/ecom-llmv2/.venv`
+- 本地开发可以自行决定是否隔离环境
+- AutoDL 训练统一使用系统 Python + `pip`
+- 当前脚本默认走 `python3`，不再依赖 `.venv`
 
 ## 1. 为什么现在改用 TRL 做 SFT
 
@@ -47,9 +41,7 @@
 ### 2.1 生成训练数据
 
 ```bash
-source /Users/dongyong/Project/Trea_code/ecom-llmv2/.venv/bin/activate
-
-python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/prepare_trl_sft_dataset.py \
+python3 /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/prepare_trl_sft_dataset.py \
   --input /Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_train.jsonl \
   --output-dir /Users/dongyong/Project/Trea_code/ecom-llmv2/data/trl_sft \
   --val-ratio 0.1
@@ -59,17 +51,15 @@ python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/prepare_trl_sft_data
 
 默认输出：
 
-- ` /Users/dongyong/Project/Trea_code/ecom-llmv2/data/trl_sft/train.jsonl`
-- ` /Users/dongyong/Project/Trea_code/ecom-llmv2/data/trl_sft/val.jsonl`
-- ` /Users/dongyong/Project/Trea_code/ecom-llmv2/data/trl_sft/dataset_summary.json`
+- `/Users/dongyong/Project/Trea_code/ecom-llmv2/data/trl_sft/train.jsonl`
+- `/Users/dongyong/Project/Trea_code/ecom-llmv2/data/trl_sft/val.jsonl`
+- `/Users/dongyong/Project/Trea_code/ecom-llmv2/data/trl_sft/dataset_summary.json`
 
 ## 3. 单次 SFT 训练
 
 ### 3.1 最小运行方式
 
 ```bash
-source /Users/dongyong/Project/Trea_code/ecom-llmv2/.venv/bin/activate
-
 export MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct
 
 bash /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_sft.sh
@@ -100,6 +90,13 @@ export LORA_R=16
 export TARGET_MODULES=attention_only
 export NUM_TRAIN_EPOCHS=3
 
+bash /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_sft.sh
+```
+
+如果你不是用默认的 `python3`，也可以覆盖：
+
+```bash
+export PYTHON_BIN=/usr/bin/python3
 bash /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_sft.sh
 ```
 
@@ -134,9 +131,7 @@ bash /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_sft.sh
 ### 5.1 干跑查看命令
 
 ```bash
-source /Users/dongyong/Project/Trea_code/ecom-llmv2/.venv/bin/activate
-
-python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablation.py \
+python3 /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablation.py \
   --model-path Qwen/Qwen2.5-1.5B-Instruct \
   --dry-run
 ```
@@ -144,7 +139,7 @@ python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablatio
 ### 5.2 正式跑消融
 
 ```bash
-python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablation.py \
+python3 /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablation.py \
   --model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
 
@@ -202,10 +197,9 @@ python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablatio
 3. 再跑第一轮 9 组 LoRA 消融
 4. 最后接现有 pairwise 评测脚本看微调胜率
 
-
 ## 9. AutoDL 环境建议
 
-如果你在 AutoDL 上训练，建议直接使用 `pip` 建环境，不用 `uv`。
+如果你在 AutoDL 上训练，建议直接使用系统 Python + `pip`，不要创建 `.venv`，也不要用 `uv`。
 
 推荐脚本：
 
@@ -214,13 +208,21 @@ python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablatio
 最小用法：
 
 ```bash
+python3 -c "import sys; print(sys.executable)"
 bash scripts/setup_pip_env_autodl.sh
-source .venv/bin/activate
+```
+
+如果你的 AutoDL 当前 Python 没有 torch，再额外设置：
+
+```bash
+export INSTALL_TORCH=true
+bash scripts/setup_pip_env_autodl.sh
 ```
 
 如果你的 AutoDL 镜像 CUDA 版本不是 `cu121`，可以覆盖：
 
 ```bash
+export INSTALL_TORCH=true
 export TORCH_INDEX_URL=https://download.pytorch.org/whl/cu118
 bash scripts/setup_pip_env_autodl.sh
 ```

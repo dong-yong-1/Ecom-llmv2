@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 TRAIN_JSONL="${TRAIN_JSONL:-$ROOT_DIR/data/golden_v1_train.jsonl}"
 TRL_DATA_DIR="${TRL_DATA_DIR:-$ROOT_DIR/data/trl_sft}"
 TRAIN_FILE="${TRAIN_FILE:-$TRL_DATA_DIR/train.jsonl}"
@@ -34,7 +34,7 @@ BF16="${BF16:-false}"
 FP16="${FP16:-false}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-false}"
 
-if [[ ! -x "$PYTHON_BIN" ]]; then
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "[error] Python not found: $PYTHON_BIN" >&2
   exit 1
 fi
@@ -46,6 +46,7 @@ fi
 
 mkdir -p "$TRL_DATA_DIR" "$OUTPUT_DIR"
 
+echo "[info] Python: $(command -v "$PYTHON_BIN")"
 echo "[info] Preparing TRL SFT data ..."
 "$PYTHON_BIN" "$ROOT_DIR/scripts/prepare_trl_sft_dataset.py" \
   --input "$TRAIN_JSONL" \
