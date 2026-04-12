@@ -1,0 +1,90 @@
+# 《黄金数据集生成说明 v1》
+
+当前仓库已提供脚本：
+
+`/Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/generate_golden_dataset_with_deepseek.py`
+
+## 1. 作用
+
+该脚本用于调用 DeepSeek API，基于当前项目文档：
+
+- `/Users/dongyong/Project/Trea_code/ecom-llmv2/doc/业务分析文档.markdown`
+- `/Users/dongyong/Project/Trea_code/ecom-llmv2/doc/input_output设计v1.markdown`
+- `/Users/dongyong/Project/Trea_code/ecom-llmv2/doc/schema设计v1.markdown`
+
+生成 `schema_v1` 格式的黄金训练数据集和黄金评测数据集。
+
+## 2. 默认特点
+
+- 支持 `train` 和 `eval` 两个 split
+- 当前内置 `100` 条训练 case、`32` 条评测 case
+- 先由脚本本地固定 case facts，再让模型只生成 `intent` 和 `target`，稳定性比整条 JSON 全交给模型更高
+- 自动做基础校验和场景一致性校验
+- 合格样本和拒绝样本分别写入不同文件
+- 不依赖第三方 Python 包
+
+## 3. 运行方式
+
+先确认 `.env` 中已配置 `DEEPSEEK_API_KEY`。
+
+推荐先跑一个很小的预览批次：
+
+```bash
+python3 /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/generate_golden_dataset_with_deepseek.py \
+  --split train \
+  --num-samples 4 \
+  --start-index 0 \
+  --sleep-seconds 2 \
+  --overwrite
+```
+
+如果预览质量没问题，可以直接生成完整训练集：
+
+```bash
+python3 /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/generate_golden_dataset_with_deepseek.py \
+  --split train \
+  --num-samples 100 \
+  --start-index 0 \
+  --sleep-seconds 2 \
+  --overwrite
+```
+
+开始生产黄金评测集：
+
+```bash
+python3 /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/generate_golden_dataset_with_deepseek.py \
+  --split eval \
+  --num-samples 32 \
+  --start-index 0 \
+  --sleep-seconds 2 \
+  --overwrite
+```
+
+如果你想分批跑，直接调整 `--start-index`：
+
+```bash
+python3 /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/generate_golden_dataset_with_deepseek.py \
+  --split train \
+  --num-samples 25 \
+  --start-index 25 \
+  --sleep-seconds 2
+```
+
+## 4. 输出文件
+
+默认输出：
+
+- 训练集合格样本：`/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_train.jsonl`
+- 训练集拒绝样本：`/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_train_rejected.jsonl`
+- 评测集合格样本：`/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_eval.jsonl`
+- 评测集拒绝样本：`/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_eval_rejected.jsonl`
+
+## 5. 建议流程
+
+建议先看前几条样本质量，再决定是否扩大规模：
+
+1. 先跑 `train` 的前 `4-8` 条做预览
+2. 打开合格文件人工检查，重点看是否乱追问、乱转人工、乱承诺
+3. 看拒绝文件里主要失败原因
+4. 预览稳定后再一次性跑满 `100` 条训练集
+5. 训练集确认后再跑 `eval` split，保持评测集和训练集 case 分离

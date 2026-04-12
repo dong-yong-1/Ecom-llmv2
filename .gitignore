@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS
+.DS_Store
+
+# Training / eval artifacts
+outputs/
+eval_results/
+checkpoints/
+tensorboard_log/
+
+# Generated training formats (can be regenerated)
+data/verl_sft/
+data/trl_sft/
+
+# Optional local caches
+.cache/
