@@ -3,8 +3,8 @@
 Unified evaluation script:
 1. generate baseline predictions when needed
 2. generate fine-tuned predictions when needed
-3. run local rule checks + LLM pairwise judging
-4. write JSON summaries and a Markdown evaluation report
+3. ask an LLM judge to evaluate task completion, rule compliance, politeness, and pairwise winner
+4. write compact JSON outputs plus badcases
 """
 
 from __future__ import annotations
@@ -35,25 +35,17 @@ DEFAULT_OUTPUT_DIR = ROOT / "eval_results" / "full_eval_v1"
 DEFAULT_FINETUNED_ADAPTER_PATH = ROOT / "model" / "trl_sft_run"
 DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DEFAULT_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-FORBIDDEN_PROMISES = [
-    "今天一定发",
-    "明天就能到",
-    "已经帮您修改成功",
-    "已经为您取消成功",
-    "已经退款成功",
-    "仓库今天一定会处理",
-    "我帮您操作好了",
-    "已经加急处理完成",
+SCORE_FIELDS = [
+    "response_a_task_completion_score",
+    "response_b_task_completion_score",
+    "response_a_politeness_score",
+    "response_b_politeness_score",
 ]
-ORDER_INFO_HINTS = ["订单号", "手机号尾号", "订单信息"]
-TRANSFER_HINTS = ["人工", "人工客服"]
-PAIRWISE_SCORE_FIELDS = [
-    "response_a_rule_correctness",
-    "response_b_rule_correctness",
-    "response_a_helpfulness",
-    "response_b_helpfulness",
-    "response_a_safety",
-    "response_b_safety",
+BOOL_FIELDS = [
+    "response_a_task_completed",
+    "response_b_task_completed",
+    "response_a_rule_passed",
+    "response_b_rule_passed",
 ]
 
 
@@ -73,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--baseline-file", default=None, help="Optional existing baseline predictions JSONL.")
     parser.add_argument("--finetuned-file", default=None, help="Optional existing fine-tuned predictions JSONL.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for predictions, summaries, report.")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for predictions and summaries.")
     parser.add_argument("--judge-model", default=DEFAULT_MODEL, help="Judge model name.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Judge API base URL.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Judge temperature.")
@@ -210,18 +202,12 @@ def cleanup_model(model: Any) -> None:
             pass
 
 
-def load_generation_model(
-    *,
-    model_name_or_path: str,
-    trust_remote_code: bool,
-    adapter_path: str | None = None,
-) -> tuple[Any, Any, str]:
+def load_generation_model(*, model_name_or_path: str, trust_remote_code: bool, adapter_path: str | None = None) -> tuple[Any, Any, str]:
     device = detect_device()
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
@@ -301,70 +287,7 @@ def extract_candidate_text(row: dict[str, Any]) -> str:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    train_payload = row.get("train_payload")
-    if isinstance(train_payload, dict):
-        target = train_payload.get("target")
-        if isinstance(target, str) and target.strip():
-            return target.strip()
     raise ValueError(f"Could not extract candidate text from row id={row.get('id')}")
-
-
-def contains_any(text: str, patterns: list[str]) -> bool:
-    return any(pattern in text for pattern in patterns)
-
-
-def find_local_rule_errors(eval_row: dict[str, Any], candidate: str) -> list[str]:
-    errors: list[str] = []
-    payload = eval_row.get("train_payload", {})
-    context = payload.get("context", {}) if isinstance(payload, dict) else {}
-    meta = eval_row.get("annotation_meta", {}) if isinstance(eval_row.get("annotation_meta"), dict) else {}
-    scenario = meta.get("scenario")
-    decision_type = meta.get("decision_type")
-    should_transfer = meta.get("should_transfer")
-    shipping_status = context.get("shipping_status")
-    logistics_status = context.get("logistics_status")
-    order_id_provided = context.get("order_id_provided")
-    is_opened = context.get("is_opened")
-    has_quality_issue = context.get("has_quality_issue")
-
-    for phrase in FORBIDDEN_PROMISES:
-        if phrase in candidate:
-            errors.append(f"contains_forbidden_promise:{phrase}")
-
-    if order_id_provided == "是" and contains_any(candidate, ORDER_INFO_HINTS):
-        errors.append("asks_for_order_info_again")
-
-    if should_transfer is True and not contains_any(candidate, TRANSFER_HINTS):
-        errors.append("should_transfer_but_no_human_handoff")
-    if should_transfer is False and scenario != "转人工" and contains_any(candidate, TRANSFER_HINTS):
-        errors.append("unexpected_human_handoff")
-
-    if decision_type == "ask_followup" and "？" not in candidate and "吗" not in candidate and "请问" not in candidate:
-        errors.append("ask_followup_without_clear_question")
-
-    if scenario == "取消订单" and shipping_status == "未发货":
-        if not contains_any(candidate, ["可以取消", "可取消"]):
-            errors.append("cancel_unshipped_missing_can_cancel")
-    if scenario == "取消订单" and shipping_status == "已发货":
-        if not contains_any(candidate, ["无法直接取消", "不能直接取消", "不支持直接取消", "不可直接取消"]):
-            errors.append("cancel_shipped_missing_cannot_cancel")
-        if not contains_any(candidate, ["退货", "退货退款"]):
-            errors.append("cancel_shipped_missing_return_guidance")
-    if scenario == "修改地址" and (shipping_status == "已发货" or logistics_status == "已揽收"):
-        if not contains_any(candidate, ["无法直接修改", "不能直接修改", "不支持修改", "不可修改"]):
-            errors.append("change_address_missing_cannot_modify")
-        if "物流" not in candidate:
-            errors.append("change_address_missing_logistics_guidance")
-    if scenario == "催发货":
-        if contains_any(candidate, ["今天发", "马上发出", "一定发货", "今天给您发出"]):
-            errors.append("urge_shipping_promises_shipment_time")
-    if scenario == "退货条件判断" and is_opened == "是" and has_quality_issue == "否":
-        if not contains_any(candidate, ["不支持售后", "不支持退货", "当前不支持", "无法办理", "无法处理"]):
-            errors.append("return_opened_no_quality_missing_refusal")
-    if scenario == "退货条件判断" and is_opened == "是" and has_quality_issue == "是":
-        if not contains_any(candidate, ["售后", "质量问题", "退货退款"]):
-            errors.append("return_opened_quality_missing_after_sales_path")
-    return errors
 
 
 def choose_blind_order(row_id: str) -> tuple[str, str]:
@@ -374,15 +297,14 @@ def choose_blind_order(row_id: str) -> tuple[str, str]:
 
 def build_judge_messages(business_doc: str, eval_row: dict[str, Any], response_a: str, response_b: str) -> list[dict[str, str]]:
     system_prompt = (
-        "你是中文电商客服模型对比评测裁判。"
-        "你要依据业务规则、黄金样本和两条候选回复，判断哪一条更好。"
-        "你必须更重视规则正确性、边界控制、不编造、该追问时追问、该转人工时转人工。"
-        "不要因为措辞更长或更像模板就偏向某一方。"
-        "只输出一个 JSON 对象，不要输出 Markdown，不要输出解释前后缀。"
+        "你是中文电商客服模型评测裁判。"
+        "你需要根据平台规则和用户问题，评估两条客服回复。"
+        "重点只看五件事：任务是否完成、是否符合平台规则、是否礼貌、哪条整体更好、有哪些 badcase。"
+        "不要输出 Markdown，不要输出解释前后缀，只输出一个 JSON 对象。"
     )
     user_prompt = (
-        "请阅读以下信息并做 pairwise 比较。\n\n"
-        "[业务规则摘要]\n"
+        "请阅读以下信息并评测。\n\n"
+        "[平台规则]\n"
         f"{business_doc}\n\n"
         "[黄金样本]\n"
         f"{json.dumps(eval_row, ensure_ascii=False, indent=2)}\n\n"
@@ -394,17 +316,23 @@ def build_judge_messages(business_doc: str, eval_row: dict[str, Any], response_a
         "{\n"
         '  "winner": "A|B|tie",\n'
         '  "confidence": 1-5,\n'
-        '  "response_a_rule_correctness": 1-5,\n'
-        '  "response_b_rule_correctness": 1-5,\n'
-        '  "response_a_helpfulness": 1-5,\n'
-        '  "response_b_helpfulness": 1-5,\n'
-        '  "response_a_safety": 1-5,\n'
-        '  "response_b_safety": 1-5,\n'
-        '  "reason": "用中文简要说明哪条更好以及为什么",\n'
-        '  "critical_issues_a": ["..."],\n'
-        '  "critical_issues_b": ["..."]\n'
+        '  "response_a_task_completed": true,\n'
+        '  "response_b_task_completed": true,\n'
+        '  "response_a_rule_passed": true,\n'
+        '  "response_b_rule_passed": true,\n'
+        '  "response_a_task_completion_score": 1-5,\n'
+        '  "response_b_task_completion_score": 1-5,\n'
+        '  "response_a_politeness_score": 1-5,\n'
+        '  "response_b_politeness_score": 1-5,\n'
+        '  "reason": "简要说明胜负原因",\n'
+        '  "badcase_tags_a": ["..."],\n'
+        '  "badcase_tags_b": ["..."]\n'
         "}\n"
-        "若两者都差不多且都符合规则，可判 tie；若有一方明显违反规则，应优先让另一方获胜。"
+        "其中：\n"
+        "- task_completed：是否完成了当前任务目标\n"
+        "- rule_passed：是否符合平台规则，是否没有越权/乱承诺/乱编造\n"
+        "- politeness_score：礼貌程度\n"
+        "- badcase_tags：只写关键问题标签，例如 乱承诺、未追问、误转人工、规则错误、答非所问、不礼貌\n"
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -459,22 +387,25 @@ def normalize_judge_result(result: dict[str, Any]) -> dict[str, Any]:
     if winner not in {"A", "B", "tie"}:
         raise ValueError("winner must be A, B, or tie")
     confidence = result.get("confidence")
-    if not isinstance(confidence, int) or confidence < 1 or confidence > 5:
+    if not isinstance(confidence, int) or not 1 <= confidence <= 5:
         raise ValueError("confidence must be int 1-5")
 
     normalized: dict[str, Any] = {"winner": winner, "confidence": confidence}
-    for field in PAIRWISE_SCORE_FIELDS:
+    for field in BOOL_FIELDS:
         value = result.get(field)
-        if not isinstance(value, int) or value < 1 or value > 5:
+        if not isinstance(value, bool):
+            raise ValueError(f"{field} must be bool")
+        normalized[field] = value
+    for field in SCORE_FIELDS:
+        value = result.get(field)
+        if not isinstance(value, int) or not 1 <= value <= 5:
             raise ValueError(f"{field} must be int 1-5")
         normalized[field] = value
-
     reason = result.get("reason")
     if not isinstance(reason, str):
         raise ValueError("reason must be string")
     normalized["reason"] = reason.strip()
-
-    for field in ("critical_issues_a", "critical_issues_b"):
+    for field in ("badcase_tags_a", "badcase_tags_b"):
         value = result.get(field, [])
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ValueError(f"{field} must be array[string]")
@@ -490,137 +421,189 @@ def resolve_winner(blind_winner: str, response_a_owner: str, response_b_owner: s
     return "tie"
 
 
-def compute_strict_winner(judge_winner: str, baseline_errors: list[str], finetuned_errors: list[str]) -> str:
-    baseline_bad = bool(baseline_errors)
-    finetuned_bad = bool(finetuned_errors)
-    if baseline_bad and not finetuned_bad:
-        return "finetuned"
-    if finetuned_bad and not baseline_bad:
-        return "baseline"
-    return judge_winner
-
-
 def aggregate_pairwise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {
             "num_samples": 0,
-            "judge_win_counts": {"baseline": 0, "finetuned": 0, "tie": 0},
-            "judge_win_rate_over_all": {"baseline": None, "finetuned": None},
-            "judge_win_rate_excluding_ties": {"baseline": None, "finetuned": None},
-            "strict_win_counts": {"baseline": 0, "finetuned": 0, "tie": 0},
-            "strict_win_rate_excluding_ties": {"baseline": None, "finetuned": None},
-            "scenario_breakdown": {},
+            "win_counts": {"baseline": 0, "finetuned": 0, "tie": 0},
+            "win_rate_excluding_ties": {"baseline": None, "finetuned": None},
+            "task_completion_rate": {"baseline": None, "finetuned": None},
+            "rule_pass_rate": {"baseline": None, "finetuned": None},
+            "avg_task_completion_score": {"baseline": None, "finetuned": None},
+            "avg_politeness_score": {"baseline": None, "finetuned": None},
             "avg_confidence": None,
-            "baseline_hard_fail_count": 0,
-            "finetuned_hard_fail_count": 0,
+            "scenario_breakdown": {},
         }
 
-    judge_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
-    strict_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
+    win_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
     scenario_groups: dict[str, list[dict[str, Any]]] = {}
-
     for row in rows:
-        judge_counts[row["judge_winner"]] += 1
-        strict_counts[row["strict_winner"]] += 1
+        win_counts[row["winner"]] += 1
         scenario_groups.setdefault(row["scenario"], []).append(row)
 
-    non_tie_judge = judge_counts["baseline"] + judge_counts["finetuned"]
-    non_tie_strict = strict_counts["baseline"] + strict_counts["finetuned"]
+    non_tie = win_counts["baseline"] + win_counts["finetuned"]
+
+    def bool_rate(owner: str, key: str) -> float:
+        total = sum(1 for row in rows if row["judge"][f"response_{owner}_{key}"])
+        return round(total / len(rows), 4)
+
+    def score_avg(owner: str, key: str) -> float:
+        return round(statistics.mean(row["judge"][f"response_{owner}_{key}"] for row in rows), 4)
+
     scenario_breakdown: dict[str, Any] = {}
     for scenario, group in sorted(scenario_groups.items()):
-        scenario_judge_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
+        scenario_win_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
         for row in group:
-            scenario_judge_counts[row["judge_winner"]] += 1
-        non_tie = scenario_judge_counts["baseline"] + scenario_judge_counts["finetuned"]
+            scenario_win_counts[row["winner"]] += 1
+        scenario_non_tie = scenario_win_counts["baseline"] + scenario_win_counts["finetuned"]
         scenario_breakdown[scenario] = {
             "num_samples": len(group),
-            "judge_win_counts": scenario_judge_counts,
-            "finetuned_win_rate_excluding_ties": (
-                round(scenario_judge_counts["finetuned"] / non_tie, 4) if non_tie else None
+            "win_rate_excluding_ties": (
+                round(scenario_win_counts["finetuned"] / scenario_non_tie, 4) if scenario_non_tie else None
             ),
-            "baseline_hard_fail_count": sum(1 for row in group if row["baseline_local_rule_errors"]),
-            "finetuned_hard_fail_count": sum(1 for row in group if row["finetuned_local_rule_errors"]),
+            "task_completion_rate": {
+                "baseline": round(sum(1 for row in group if row["judge"]["response_a_task_completed"] if row["blind_assignment"]["response_a_owner"] == "baseline") / len(group), 4)
+                if group else None,
+                "finetuned": round(sum(1 for row in group if row["judge"]["response_a_task_completed"] if row["blind_assignment"]["response_a_owner"] == "finetuned") / len(group), 4)
+                if group else None,
+            },
         }
 
     return {
         "num_samples": len(rows),
-        "judge_win_counts": judge_counts,
-        "judge_win_rate_over_all": {
-            "baseline": round(judge_counts["baseline"] / len(rows), 4),
-            "finetuned": round(judge_counts["finetuned"] / len(rows), 4),
+        "win_counts": win_counts,
+        "win_rate_excluding_ties": {
+            "baseline": round(win_counts["baseline"] / non_tie, 4) if non_tie else None,
+            "finetuned": round(win_counts["finetuned"] / non_tie, 4) if non_tie else None,
         },
-        "judge_win_rate_excluding_ties": {
-            "baseline": round(judge_counts["baseline"] / non_tie_judge, 4) if non_tie_judge else None,
-            "finetuned": round(judge_counts["finetuned"] / non_tie_judge, 4) if non_tie_judge else None,
+        "task_completion_rate": {
+            "baseline": bool_rate("a", "task_completed") if any(row["blind_assignment"]["response_a_owner"] == "baseline" for row in rows) else None,
+            "finetuned": bool_rate("b", "task_completed") if any(row["blind_assignment"]["response_b_owner"] == "finetuned" for row in rows) else None,
         },
-        "strict_win_counts": strict_counts,
-        "strict_win_rate_excluding_ties": {
-            "baseline": round(strict_counts["baseline"] / non_tie_strict, 4) if non_tie_strict else None,
-            "finetuned": round(strict_counts["finetuned"] / non_tie_strict, 4) if non_tie_strict else None,
+        "rule_pass_rate": {
+            "baseline": bool_rate("a", "rule_passed") if any(row["blind_assignment"]["response_a_owner"] == "baseline" for row in rows) else None,
+            "finetuned": bool_rate("b", "rule_passed") if any(row["blind_assignment"]["response_b_owner"] == "finetuned" for row in rows) else None,
+        },
+        "avg_task_completion_score": {
+            "baseline": score_avg("a", "task_completion_score") if rows else None,
+            "finetuned": score_avg("b", "task_completion_score") if rows else None,
+        },
+        "avg_politeness_score": {
+            "baseline": score_avg("a", "politeness_score") if rows else None,
+            "finetuned": score_avg("b", "politeness_score") if rows else None,
         },
         "avg_confidence": round(statistics.mean(row["judge"]["confidence"] for row in rows), 4),
-        "baseline_hard_fail_count": sum(1 for row in rows if row["baseline_local_rule_errors"]),
-        "finetuned_hard_fail_count": sum(1 for row in rows if row["finetuned_local_rule_errors"]),
         "scenario_breakdown": scenario_breakdown,
     }
 
 
-def build_report(summary: dict[str, Any], top_rows: list[dict[str, Any]]) -> str:
-    aggregate = summary["aggregate"]
-    lines = [
-        "# 评测报告",
-        "",
-        "## 1. 评测配置",
-        "",
-        f"- 评测集：`{summary['eval_set']}`",
-        f"- 基座模型：`{summary['baseline_model_name_or_path']}`",
-        f"- 微调模型：`{summary['finetuned_model_name_or_path']}`",
-        f"- LoRA 适配器：`{summary['finetuned_adapter_path'] or '无'}`",
-        f"- 基座预测文件：`{summary['baseline_file']}`",
-        f"- 微调预测文件：`{summary['finetuned_file']}`",
-        f"- 裁判模型：`{summary['judge_model']}`",
-        "",
-        "## 2. 总体结果",
-        "",
-        f"- 总样本数：{aggregate['num_samples']}",
-        f"- 微调模型 judge 胜率（去平局）：{aggregate['judge_win_rate_excluding_ties']['finetuned']}",
-        f"- 微调模型 strict 胜率（去平局）：{aggregate['strict_win_rate_excluding_ties']['finetuned']}",
-        f"- 基座硬错误数：{aggregate['baseline_hard_fail_count']}",
-        f"- 微调硬错误数：{aggregate['finetuned_hard_fail_count']}",
-        f"- 平均裁判置信度：{aggregate['avg_confidence']}",
-        "",
-        "## 3. 分场景结果",
-        "",
-    ]
-    for scenario, item in aggregate["scenario_breakdown"].items():
-        lines.append(
-            f"- {scenario}：样本 {item['num_samples']}，微调去平局胜率 {item['finetuned_win_rate_excluding_ties']}，"
-            f"基座硬错误 {item['baseline_hard_fail_count']}，微调硬错误 {item['finetuned_hard_fail_count']}"
+def extract_owner_value(row: dict[str, Any], owner: str, field_suffix: str) -> Any:
+    assignment = row["blind_assignment"]
+    if assignment["response_a_owner"] == owner:
+        return row["judge"][f"response_a_{field_suffix}"]
+    return row["judge"][f"response_b_{field_suffix}"]
+
+
+def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "num_samples": 0,
+            "win_counts": {"baseline": 0, "finetuned": 0, "tie": 0},
+            "win_rate_excluding_ties": {"baseline": None, "finetuned": None},
+            "task_completion_rate": {"baseline": None, "finetuned": None},
+            "rule_pass_rate": {"baseline": None, "finetuned": None},
+            "avg_task_completion_score": {"baseline": None, "finetuned": None},
+            "avg_politeness_score": {"baseline": None, "finetuned": None},
+            "avg_confidence": None,
+            "scenario_breakdown": {},
+        }
+
+    win_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
+    scenario_groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        win_counts[row["winner"]] += 1
+        scenario_groups.setdefault(row["scenario"], []).append(row)
+    non_tie = win_counts["baseline"] + win_counts["finetuned"]
+
+    def rate(owner: str, field_suffix: str) -> float:
+        return round(sum(1 for row in rows if extract_owner_value(row, owner, field_suffix)) / len(rows), 4)
+
+    def avg(owner: str, field_suffix: str) -> float:
+        return round(statistics.mean(extract_owner_value(row, owner, field_suffix) for row in rows), 4)
+
+    scenario_breakdown: dict[str, Any] = {}
+    for scenario, group in sorted(scenario_groups.items()):
+        scenario_win_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
+        for row in group:
+            scenario_win_counts[row["winner"]] += 1
+        scenario_non_tie = scenario_win_counts["baseline"] + scenario_win_counts["finetuned"]
+        scenario_breakdown[scenario] = {
+            "num_samples": len(group),
+            "win_rate_excluding_ties": (
+                round(scenario_win_counts["finetuned"] / scenario_non_tie, 4) if scenario_non_tie else None
+            ),
+            "task_completion_rate": {
+                "baseline": round(sum(1 for row in group if extract_owner_value(row, "baseline", "task_completed")) / len(group), 4),
+                "finetuned": round(sum(1 for row in group if extract_owner_value(row, "finetuned", "task_completed")) / len(group), 4),
+            },
+            "rule_pass_rate": {
+                "baseline": round(sum(1 for row in group if extract_owner_value(row, "baseline", "rule_passed")) / len(group), 4),
+                "finetuned": round(sum(1 for row in group if extract_owner_value(row, "finetuned", "rule_passed")) / len(group), 4),
+            },
+        }
+
+    return {
+        "num_samples": len(rows),
+        "win_counts": win_counts,
+        "win_rate_excluding_ties": {
+            "baseline": round(win_counts["baseline"] / non_tie, 4) if non_tie else None,
+            "finetuned": round(win_counts["finetuned"] / non_tie, 4) if non_tie else None,
+        },
+        "task_completion_rate": {
+            "baseline": rate("baseline", "task_completed"),
+            "finetuned": rate("finetuned", "task_completed"),
+        },
+        "rule_pass_rate": {
+            "baseline": rate("baseline", "rule_passed"),
+            "finetuned": rate("finetuned", "rule_passed"),
+        },
+        "avg_task_completion_score": {
+            "baseline": avg("baseline", "task_completion_score"),
+            "finetuned": avg("finetuned", "task_completion_score"),
+        },
+        "avg_politeness_score": {
+            "baseline": avg("baseline", "politeness_score"),
+            "finetuned": avg("finetuned", "politeness_score"),
+        },
+        "avg_confidence": round(statistics.mean(row["judge"]["confidence"] for row in rows), 4),
+        "scenario_breakdown": scenario_breakdown,
+    }
+
+
+def build_badcases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    badcases: list[dict[str, Any]] = []
+    for row in rows:
+        finetuned_task_completed = extract_owner_value(row, "finetuned", "task_completed")
+        finetuned_rule_passed = extract_owner_value(row, "finetuned", "rule_passed")
+        finetuned_politeness_score = extract_owner_value(row, "finetuned", "politeness_score")
+        finetuned_badcase_tags = row["judge"]["badcase_tags_a"] if row["blind_assignment"]["response_a_owner"] == "finetuned" else row["judge"]["badcase_tags_b"]
+        if row["winner"] == "finetuned" and finetuned_task_completed and finetuned_rule_passed and finetuned_politeness_score >= 4:
+            continue
+        badcases.append(
+            {
+                "id": row["id"],
+                "scenario": row["scenario"],
+                "winner": row["winner"],
+                "baseline_target": row["baseline_target"],
+                "finetuned_target": row["finetuned_target"],
+                "finetuned_task_completed": finetuned_task_completed,
+                "finetuned_rule_passed": finetuned_rule_passed,
+                "finetuned_politeness_score": finetuned_politeness_score,
+                "finetuned_badcase_tags": finetuned_badcase_tags,
+                "judge_reason": row["judge"]["reason"],
+            }
         )
-    lines.extend(["", "## 4. 典型样本", ""])
-    if not top_rows:
-        lines.append("- 无")
-    else:
-        for row in top_rows:
-            lines.extend(
-                [
-                    f"### {row['id']} / {row['scenario']}",
-                    "",
-                    f"- 裁判结果：{row['judge_winner']} / strict={row['strict_winner']}",
-                    f"- 裁判理由：{row['judge']['reason']}",
-                    f"- 基座错误：{', '.join(row['baseline_local_rule_errors']) if row['baseline_local_rule_errors'] else '无'}",
-                    f"- 微调错误：{', '.join(row['finetuned_local_rule_errors']) if row['finetuned_local_rule_errors'] else '无'}",
-                    f"- 基座回答：{row['baseline_target']}",
-                    f"- 微调回答：{row['finetuned_target']}",
-                    "",
-                ]
-            )
-    if summary["errors"]:
-        lines.extend(["## 5. 错误记录", ""])
-        for error in summary["errors"][:20]:
-            lines.append(f"- {error['id']}: {error['error']}")
-        lines.append("")
-    return "\n".join(lines).strip() + "\n"
+    return badcases
 
 
 def main() -> int:
@@ -640,7 +623,7 @@ def main() -> int:
     finetuned_path = Path(args.finetuned_file) if args.finetuned_file else output_dir / "finetuned_predictions.jsonl"
     detail_path = output_dir / "pairwise_results.jsonl"
     summary_path = output_dir / "pairwise_summary.json"
-    report_path = output_dir / "evaluation_report.md"
+    badcase_path = output_dir / "badcases.jsonl"
     if not args.overwrite:
         if args.baseline_file is None:
             baseline_path = output_dir / f"baseline_predictions_{timestamp}.jsonl"
@@ -648,7 +631,7 @@ def main() -> int:
             finetuned_path = output_dir / f"finetuned_predictions_{timestamp}.jsonl"
         detail_path = output_dir / f"pairwise_results_{timestamp}.jsonl"
         summary_path = output_dir / f"pairwise_summary_{timestamp}.json"
-        report_path = output_dir / f"evaluation_report_{timestamp}.md"
+        badcase_path = output_dir / f"badcases_{timestamp}.jsonl"
 
     if args.baseline_file is None:
         print("[stage] generating baseline predictions", flush=True)
@@ -664,9 +647,7 @@ def main() -> int:
     if args.finetuned_file is None:
         print("[stage] generating finetuned predictions", flush=True)
         finetuned_model_name_or_path = args.finetuned_model_name_or_path or args.baseline_model_name_or_path
-        adapter_path = args.finetuned_adapter_path
-        if args.finetuned_model_name_or_path:
-            adapter_path = None
+        adapter_path = None if args.finetuned_model_name_or_path else args.finetuned_adapter_path
         generate_predictions(
             model_name_or_path=finetuned_model_name_or_path,
             eval_rows=eval_rows,
@@ -704,8 +685,6 @@ def main() -> int:
         try:
             baseline_text = extract_candidate_text(baseline_row)
             finetuned_text = extract_candidate_text(finetuned_row)
-            baseline_errors = find_local_rule_errors(eval_row, baseline_text)
-            finetuned_errors = find_local_rule_errors(eval_row, finetuned_text)
             response_a_owner, response_b_owner = choose_blind_order(row_id)
             response_a = baseline_text if response_a_owner == "baseline" else finetuned_text
             response_b = baseline_text if response_b_owner == "baseline" else finetuned_text
@@ -723,61 +702,56 @@ def main() -> int:
             errors.append({"id": row_id, "error": f"judge_error: {exc}"})
             print(f"[judge {index}/{len(eval_rows)}] {row_id} -> judge error: {exc}", flush=True)
         else:
-            judge_winner = resolve_winner(judge["winner"], response_a_owner, response_b_owner)
-            strict_winner = compute_strict_winner(judge_winner, baseline_errors, finetuned_errors)
+            winner = resolve_winner(judge["winner"], response_a_owner, response_b_owner)
             result_row = {
                 "id": row_id,
                 "scenario": scenario,
                 "baseline_target": baseline_text,
                 "finetuned_target": finetuned_text,
-                "baseline_local_rule_errors": baseline_errors,
-                "finetuned_local_rule_errors": finetuned_errors,
                 "blind_assignment": {
                     "response_a_owner": response_a_owner,
                     "response_b_owner": response_b_owner,
                 },
                 "judge": judge,
-                "judge_winner": judge_winner,
-                "strict_winner": strict_winner,
+                "winner": winner,
             }
             results.append(result_row)
             print(
-                f"[judge {index}/{len(eval_rows)}] {row_id} -> judge={judge_winner} | strict={strict_winner}"
-                f" | baseline_err={len(baseline_errors)} | finetuned_err={len(finetuned_errors)}",
+                f"[judge {index}/{len(eval_rows)}] {row_id} -> winner={winner}"
+                f" | baseline_rule={extract_owner_value(result_row, 'baseline', 'rule_passed')}"
+                f" | finetuned_rule={extract_owner_value(result_row, 'finetuned', 'rule_passed')}",
                 flush=True,
             )
         if index < len(eval_rows):
             time.sleep(args.sleep_seconds)
 
+    badcases = build_badcases(results)
     summary = {
         "eval_set": str(Path(args.eval_set).resolve()),
         "baseline_model_name_or_path": args.baseline_model_name_or_path,
         "finetuned_model_name_or_path": args.finetuned_model_name_or_path or args.baseline_model_name_or_path,
-        "finetuned_adapter_path": (
-            None
-            if args.finetuned_model_name_or_path
-            else (str(Path(args.finetuned_adapter_path).resolve()) if args.finetuned_adapter_path else None)
-        ),
+        "finetuned_adapter_path": None if args.finetuned_model_name_or_path else (str(Path(args.finetuned_adapter_path).resolve()) if args.finetuned_adapter_path else None),
         "baseline_file": str(baseline_path.resolve()),
         "finetuned_file": str(finetuned_path.resolve()),
         "judge_model": args.judge_model,
         "num_eval_rows": len(eval_rows),
         "num_scored_rows": len(results),
         "num_errors": len(errors),
-        "aggregate": aggregate_pairwise(results),
+        "badcase_count": len(badcases),
+        "aggregate": build_summary(results),
         "errors": errors,
     }
 
     write_jsonl(detail_path, results)
     write_json(summary_path, summary)
-    report_path.write_text(build_report(summary, results[: min(5, len(results))]), encoding="utf-8")
+    write_jsonl(badcase_path, badcases)
 
     print("\nDone.")
     print(f"Baseline predictions: {baseline_path}")
     print(f"Finetuned predictions: {finetuned_path}")
     print(f"Details: {detail_path}")
     print(f"Summary: {summary_path}")
-    print(f"Report: {report_path}")
+    print(f"Badcases: {badcase_path}")
     return 0 if not errors else 1
 
 
