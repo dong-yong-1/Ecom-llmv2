@@ -14,7 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNNER = ROOT / "scripts" / "run_trl_sft.sh"
-DEFAULT_OUTPUT_ROOT = ROOT / "outputs" / "trl_lora_ablation"
+DEFAULT_OUTPUT_ROOT = ROOT / "model" / "trl_lora_ablation"
 
 
 def parse_args() -> argparse.Namespace:

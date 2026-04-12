@@ -18,6 +18,7 @@ from trl import SFTConfig, SFTTrainer
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = ROOT / "data" / "trl_sft"
+DEFAULT_MODEL_DIR = ROOT / "model" / "trl_sft_run"
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name-or-path", required=True, help="Base model path or HF repo.")
     parser.add_argument("--train-file", default=str(DEFAULT_DATA_DIR / "train.jsonl"), help="Train JSONL.")
     parser.add_argument("--eval-file", default=str(DEFAULT_DATA_DIR / "val.jsonl"), help="Eval JSONL.")
-    parser.add_argument("--output-dir", default=str(ROOT / "outputs" / "trl_sft_run"), help="Output dir.")
+    parser.add_argument("--output-dir", default=str(DEFAULT_MODEL_DIR), help="Output dir.")
     parser.add_argument("--max-length", type=int, default=1024, help="Max sequence length.")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate.")
     parser.add_argument("--num-train-epochs", type=float, default=3.0, help="Train epochs.")

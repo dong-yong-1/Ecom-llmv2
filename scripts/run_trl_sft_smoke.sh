@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export MODEL_PATH="${MODEL_PATH:-sshleifer/tiny-gpt2}"
-export OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/outputs/trl_sft_smoke}"
+export OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/model/trl_sft_smoke}"
 export MAX_LENGTH="${MAX_LENGTH:-128}"
 export NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-1}"
 export MAX_STEPS="${MAX_STEPS:-1}"

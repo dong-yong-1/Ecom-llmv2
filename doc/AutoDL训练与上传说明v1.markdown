@@ -128,33 +128,33 @@ bash scripts/run_trl_sft_smoke.sh
 
 ## 7. 评测阶段
 
-基线模型预测：
+现在评测统一收敛成一个脚本：
+
+- 自动生成基座模型回答
+- 自动生成微调模型回答
+- 自动做 LLM pairwise judge
+- 自动输出 JSON summary 和 Markdown 评测报告
+
+例如：
 
 ```bash
 source .venv/bin/activate
 
-python scripts/generate_eval_predictions.py \
-  --model-name-or-path Qwen/Qwen2.5-1.5B-Instruct \
-  --eval-set data/golden_v1_eval.jsonl \
-  --output data/baseline_eval_predictions.jsonl
-```
-
-微调模型预测：
-
-```bash
-python scripts/generate_eval_predictions.py \
-  --model-name-or-path Qwen/Qwen2.5-1.5B-Instruct \
-  --adapter-path /root/autodl-tmp/ecom_trl_runs/qwen25_r16_attn_mlp/checkpoint-xxx \
-  --eval-set data/golden_v1_eval.jsonl \
-  --output data/finetuned_eval_predictions.jsonl
-```
-
-LLM 对比评测：
-
-```bash
 python scripts/compare_baseline_vs_finetuned_with_llm_judge.py \
-  --baseline-file data/baseline_eval_predictions.jsonl \
-  --finetuned-file data/finetuned_eval_predictions.jsonl \
+  --baseline-model-name-or-path Qwen/Qwen2.5-1.5B-Instruct \
+  --finetuned-adapter-path model/trl_sft_run \
   --sleep-seconds 2 \
   --overwrite
 ```
+
+输出目录默认在：
+
+- `eval_results/full_eval_v1`
+
+主要文件包括：
+
+- `baseline_predictions.jsonl`
+- `finetuned_predictions.jsonl`
+- `pairwise_results.jsonl`
+- `pairwise_summary.json`
+- `evaluation_report.md`

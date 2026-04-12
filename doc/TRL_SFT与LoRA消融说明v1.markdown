@@ -185,4 +185,4 @@ bash /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/setup_uv_env_autodl.sh
 4. AutoDL pull 最新代码
 5. AutoDL 跑单次 SFT
 6. 再跑第一轮 9 组 LoRA 消融
-7. 最后接现有 pairwise 评测脚本看微调胜率
+7. 最后直接跑统一评测脚本看微调胜率和评测报告
