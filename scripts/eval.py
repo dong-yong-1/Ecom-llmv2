@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Unified evaluation script:
-1. generate baseline predictions when needed
-2. generate fine-tuned predictions when needed
-3. ask an LLM judge to evaluate task completion, rule compliance, politeness, and pairwise winner
-4. write compact JSON outputs plus badcases
-"""
+"""Unified evaluation entry for baseline vs fine-tuned models."""
 
 from __future__ import annotations
 
@@ -25,7 +19,6 @@ from typing import Any
 import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC_DIR = ROOT / "doc"
@@ -50,33 +43,25 @@ BOOL_FIELDS = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run end-to-end baseline vs fine-tuned evaluation.")
+    parser = argparse.ArgumentParser(description="Unified evaluation script.")
     parser.add_argument("--eval-set", default=str(DEFAULT_EVAL_SET), help="Golden eval set JSONL path.")
     parser.add_argument("--baseline-model-name-or-path", required=True, help="Baseline/base model path or HF repo.")
-    parser.add_argument(
-        "--finetuned-model-name-or-path",
-        default=None,
-        help="Optional merged fine-tuned model path. If omitted, baseline model + adapter path is used.",
-    )
-    parser.add_argument(
-        "--finetuned-adapter-path",
-        default=str(DEFAULT_FINETUNED_ADAPTER_PATH),
-        help="LoRA adapter path for the fine-tuned model.",
-    )
+    parser.add_argument("--finetuned-model-name-or-path", default=None, help="Optional merged fine-tuned model path.")
+    parser.add_argument("--finetuned-adapter-path", default=str(DEFAULT_FINETUNED_ADAPTER_PATH), help="LoRA adapter path.")
     parser.add_argument("--baseline-file", default=None, help="Optional existing baseline predictions JSONL.")
-    parser.add_argument("--finetuned-file", default=None, help="Optional existing fine-tuned predictions JSONL.")
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for predictions and summaries.")
+    parser.add_argument("--finetuned-file", default=None, help="Optional existing finetuned predictions JSONL.")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory.")
     parser.add_argument("--judge-model", default=DEFAULT_MODEL, help="Judge model name.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Judge API base URL.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Judge temperature.")
     parser.add_argument("--max-tokens", type=int, default=1000, help="Judge max tokens.")
-    parser.add_argument("--timeout", type=int, default=180, help="Judge request timeout in seconds.")
-    parser.add_argument("--sleep-seconds", type=float, default=1.5, help="Sleep time between judge API calls.")
+    parser.add_argument("--timeout", type=int, default=180, help="Judge request timeout.")
+    parser.add_argument("--sleep-seconds", type=float, default=1.5, help="Sleep time between judge calls.")
     parser.add_argument("--max-new-tokens", type=int, default=256, help="Generation max new tokens.")
     parser.add_argument("--generation-temperature", type=float, default=0.0, help="Generation temperature.")
-    parser.add_argument("--generation-top-p", type=float, default=1.0, help="Generation top-p when sampling.")
+    parser.add_argument("--generation-top-p", type=float, default=1.0, help="Generation top-p.")
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--limit", type=int, default=None, help="Optional limit for preview runs.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional sample limit.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output files.")
     return parser.parse_args()
 
@@ -131,8 +116,6 @@ def write_json(path: Path, obj: dict[str, Any]) -> None:
 
 
 def read_doc(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"Required doc not found: {path}")
     return path.read_text(encoding="utf-8")
 
 
@@ -162,10 +145,7 @@ def build_prompt_messages(row: dict[str, Any]) -> list[dict[str, str]]:
         label = "用户" if role == "user" else "客服"
         lines.append(f"{label}：{content}")
     lines.extend(["", "请输出当前轮客服回复。"])
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "\n".join(lines)},
-    ]
+    return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(lines)}]
 
 
 def build_prompt_text(messages: list[dict[str, str]], tokenizer: Any) -> str:
@@ -195,14 +175,9 @@ def cleanup_model(model: Any) -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    if getattr(torch, "mps", None) is not None and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        try:
-            torch.mps.empty_cache()
-        except Exception:
-            pass
 
 
-def load_generation_model(*, model_name_or_path: str, trust_remote_code: bool, adapter_path: str | None = None) -> tuple[Any, Any, str]:
+def load_generation_model(model_name_or_path: str, trust_remote_code: bool, adapter_path: str | None = None) -> tuple[Any, Any, str]:
     device = detect_device()
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
@@ -224,47 +199,24 @@ def load_generation_model(*, model_name_or_path: str, trust_remote_code: bool, a
     return tokenizer, model, device
 
 
-def generate_predictions(
-    *,
-    model_name_or_path: str,
-    eval_rows: list[dict[str, Any]],
-    output_path: Path,
-    trust_remote_code: bool,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    adapter_path: str | None = None,
-) -> Path:
-    tokenizer, model, device = load_generation_model(
-        model_name_or_path=model_name_or_path,
-        trust_remote_code=trust_remote_code,
-        adapter_path=adapter_path,
-    )
+def generate_predictions(model_name_or_path: str, eval_rows: list[dict[str, Any]], output_path: Path, trust_remote_code: bool, max_new_tokens: int, temperature: float, top_p: float, adapter_path: str | None = None) -> Path:
+    tokenizer, model, device = load_generation_model(model_name_or_path, trust_remote_code, adapter_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
     do_sample = temperature > 0
-
     for index, row in enumerate(eval_rows, start=1):
-        messages = build_prompt_messages(row)
-        prompt_text = build_prompt_text(messages, tokenizer)
-        inputs = tokenizer(prompt_text, return_tensors="pt")
-        inputs = move_inputs(inputs, device)
-        generation_kwargs = {
-            "max_new_tokens": max_new_tokens,
-            "do_sample": do_sample,
-            "pad_token_id": tokenizer.pad_token_id,
-            "eos_token_id": tokenizer.eos_token_id,
-        }
+        prompt_text = build_prompt_text(build_prompt_messages(row), tokenizer)
+        inputs = move_inputs(tokenizer(prompt_text, return_tensors="pt"), device)
+        generation_kwargs = {"max_new_tokens": max_new_tokens, "do_sample": do_sample, "pad_token_id": tokenizer.pad_token_id, "eos_token_id": tokenizer.eos_token_id}
         if do_sample:
             generation_kwargs["temperature"] = temperature
             generation_kwargs["top_p"] = top_p
         with torch.no_grad():
             output_ids = model.generate(**inputs, **generation_kwargs)
-        generated = output_ids[0][inputs["input_ids"].shape[1] :]
+        generated = output_ids[0][inputs["input_ids"].shape[1]:]
         prediction = tokenizer.decode(generated, skip_special_tokens=True).strip()
         records.append({"id": row["id"], "prediction": prediction})
         print(f"[generate {index}/{len(eval_rows)}] {row['id']}", flush=True)
-
     write_jsonl(output_path, records)
     cleanup_model(model)
     return output_path
@@ -298,9 +250,8 @@ def choose_blind_order(row_id: str) -> tuple[str, str]:
 def build_judge_messages(business_doc: str, eval_row: dict[str, Any], response_a: str, response_b: str) -> list[dict[str, str]]:
     system_prompt = (
         "你是中文电商客服模型评测裁判。"
-        "你需要根据平台规则和用户问题，评估两条客服回复。"
-        "重点只看五件事：任务是否完成、是否符合平台规则、是否礼貌、哪条整体更好、有哪些 badcase。"
-        "不要输出 Markdown，不要输出解释前后缀，只输出一个 JSON 对象。"
+        "你只评估五个维度：任务完成率、平台规则符合度、礼貌度、整体胜负、badcase。"
+        "不要输出 Markdown，只输出一个 JSON 对象。"
     )
     user_prompt = (
         "请阅读以下信息并评测。\n\n"
@@ -328,42 +279,16 @@ def build_judge_messages(business_doc: str, eval_row: dict[str, Any], response_a
         '  "badcase_tags_a": ["..."],\n'
         '  "badcase_tags_b": ["..."]\n'
         "}\n"
-        "其中：\n"
-        "- task_completed：是否完成了当前任务目标\n"
-        "- rule_passed：是否符合平台规则，是否没有越权/乱承诺/乱编造\n"
-        "- politeness_score：礼貌程度\n"
-        "- badcase_tags：只写关键问题标签，例如 乱承诺、未追问、误转人工、规则错误、答非所问、不礼貌\n"
     )
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
 
-def call_chat_completions(
-    *,
-    api_key: str,
-    base_url: str,
-    model: str,
-    messages: list[dict[str, str]],
-    temperature: float,
-    max_tokens: int,
-    timeout: int,
-) -> str:
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
-    }
+def call_chat_completions(api_key: str, base_url: str, model: str, messages: list[dict[str, str]], temperature: float, max_tokens: int, timeout: int) -> str:
+    payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens, "response_format": {"type": "json_object"}}
     request = urllib.request.Request(
         base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -374,7 +299,6 @@ def call_chat_completions(
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Network error: {exc}") from exc
-
     parsed = json.loads(body)
     try:
         return parsed["choices"][0]["message"]["content"]
@@ -389,7 +313,6 @@ def normalize_judge_result(result: dict[str, Any]) -> dict[str, Any]:
     confidence = result.get("confidence")
     if not isinstance(confidence, int) or not 1 <= confidence <= 5:
         raise ValueError("confidence must be int 1-5")
-
     normalized: dict[str, Any] = {"winner": winner, "confidence": confidence}
     for field in BOOL_FIELDS:
         value = result.get(field)
@@ -421,103 +344,15 @@ def resolve_winner(blind_winner: str, response_a_owner: str, response_b_owner: s
     return "tie"
 
 
-def aggregate_pairwise(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    if not rows:
-        return {
-            "num_samples": 0,
-            "win_counts": {"baseline": 0, "finetuned": 0, "tie": 0},
-            "win_rate_excluding_ties": {"baseline": None, "finetuned": None},
-            "task_completion_rate": {"baseline": None, "finetuned": None},
-            "rule_pass_rate": {"baseline": None, "finetuned": None},
-            "avg_task_completion_score": {"baseline": None, "finetuned": None},
-            "avg_politeness_score": {"baseline": None, "finetuned": None},
-            "avg_confidence": None,
-            "scenario_breakdown": {},
-        }
-
-    win_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
-    scenario_groups: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        win_counts[row["winner"]] += 1
-        scenario_groups.setdefault(row["scenario"], []).append(row)
-
-    non_tie = win_counts["baseline"] + win_counts["finetuned"]
-
-    def bool_rate(owner: str, key: str) -> float:
-        total = sum(1 for row in rows if row["judge"][f"response_{owner}_{key}"])
-        return round(total / len(rows), 4)
-
-    def score_avg(owner: str, key: str) -> float:
-        return round(statistics.mean(row["judge"][f"response_{owner}_{key}"] for row in rows), 4)
-
-    scenario_breakdown: dict[str, Any] = {}
-    for scenario, group in sorted(scenario_groups.items()):
-        scenario_win_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
-        for row in group:
-            scenario_win_counts[row["winner"]] += 1
-        scenario_non_tie = scenario_win_counts["baseline"] + scenario_win_counts["finetuned"]
-        scenario_breakdown[scenario] = {
-            "num_samples": len(group),
-            "win_rate_excluding_ties": (
-                round(scenario_win_counts["finetuned"] / scenario_non_tie, 4) if scenario_non_tie else None
-            ),
-            "task_completion_rate": {
-                "baseline": round(sum(1 for row in group if row["judge"]["response_a_task_completed"] if row["blind_assignment"]["response_a_owner"] == "baseline") / len(group), 4)
-                if group else None,
-                "finetuned": round(sum(1 for row in group if row["judge"]["response_a_task_completed"] if row["blind_assignment"]["response_a_owner"] == "finetuned") / len(group), 4)
-                if group else None,
-            },
-        }
-
-    return {
-        "num_samples": len(rows),
-        "win_counts": win_counts,
-        "win_rate_excluding_ties": {
-            "baseline": round(win_counts["baseline"] / non_tie, 4) if non_tie else None,
-            "finetuned": round(win_counts["finetuned"] / non_tie, 4) if non_tie else None,
-        },
-        "task_completion_rate": {
-            "baseline": bool_rate("a", "task_completed") if any(row["blind_assignment"]["response_a_owner"] == "baseline" for row in rows) else None,
-            "finetuned": bool_rate("b", "task_completed") if any(row["blind_assignment"]["response_b_owner"] == "finetuned" for row in rows) else None,
-        },
-        "rule_pass_rate": {
-            "baseline": bool_rate("a", "rule_passed") if any(row["blind_assignment"]["response_a_owner"] == "baseline" for row in rows) else None,
-            "finetuned": bool_rate("b", "rule_passed") if any(row["blind_assignment"]["response_b_owner"] == "finetuned" for row in rows) else None,
-        },
-        "avg_task_completion_score": {
-            "baseline": score_avg("a", "task_completion_score") if rows else None,
-            "finetuned": score_avg("b", "task_completion_score") if rows else None,
-        },
-        "avg_politeness_score": {
-            "baseline": score_avg("a", "politeness_score") if rows else None,
-            "finetuned": score_avg("b", "politeness_score") if rows else None,
-        },
-        "avg_confidence": round(statistics.mean(row["judge"]["confidence"] for row in rows), 4),
-        "scenario_breakdown": scenario_breakdown,
-    }
-
-
 def extract_owner_value(row: dict[str, Any], owner: str, field_suffix: str) -> Any:
-    assignment = row["blind_assignment"]
-    if assignment["response_a_owner"] == owner:
+    if row["blind_assignment"]["response_a_owner"] == owner:
         return row["judge"][f"response_a_{field_suffix}"]
     return row["judge"][f"response_b_{field_suffix}"]
 
 
 def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
-        return {
-            "num_samples": 0,
-            "win_counts": {"baseline": 0, "finetuned": 0, "tie": 0},
-            "win_rate_excluding_ties": {"baseline": None, "finetuned": None},
-            "task_completion_rate": {"baseline": None, "finetuned": None},
-            "rule_pass_rate": {"baseline": None, "finetuned": None},
-            "avg_task_completion_score": {"baseline": None, "finetuned": None},
-            "avg_politeness_score": {"baseline": None, "finetuned": None},
-            "avg_confidence": None,
-            "scenario_breakdown": {},
-        }
-
+        return {"num_samples": 0, "win_rate_excluding_ties": {"baseline": None, "finetuned": None}, "task_completion_rate": {"baseline": None, "finetuned": None}, "rule_pass_rate": {"baseline": None, "finetuned": None}, "avg_task_completion_score": {"baseline": None, "finetuned": None}, "avg_politeness_score": {"baseline": None, "finetuned": None}, "avg_confidence": None}
     win_counts = {"baseline": 0, "finetuned": 0, "tie": 0}
     scenario_groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -539,42 +374,18 @@ def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         scenario_non_tie = scenario_win_counts["baseline"] + scenario_win_counts["finetuned"]
         scenario_breakdown[scenario] = {
             "num_samples": len(group),
-            "win_rate_excluding_ties": (
-                round(scenario_win_counts["finetuned"] / scenario_non_tie, 4) if scenario_non_tie else None
-            ),
-            "task_completion_rate": {
-                "baseline": round(sum(1 for row in group if extract_owner_value(row, "baseline", "task_completed")) / len(group), 4),
-                "finetuned": round(sum(1 for row in group if extract_owner_value(row, "finetuned", "task_completed")) / len(group), 4),
-            },
-            "rule_pass_rate": {
-                "baseline": round(sum(1 for row in group if extract_owner_value(row, "baseline", "rule_passed")) / len(group), 4),
-                "finetuned": round(sum(1 for row in group if extract_owner_value(row, "finetuned", "rule_passed")) / len(group), 4),
-            },
+            "win_rate_excluding_ties": round(scenario_win_counts["finetuned"] / scenario_non_tie, 4) if scenario_non_tie else None,
+            "task_completion_rate": {"baseline": round(sum(1 for row in group if extract_owner_value(row, "baseline", "task_completed")) / len(group), 4), "finetuned": round(sum(1 for row in group if extract_owner_value(row, "finetuned", "task_completed")) / len(group), 4)},
+            "rule_pass_rate": {"baseline": round(sum(1 for row in group if extract_owner_value(row, "baseline", "rule_passed")) / len(group), 4), "finetuned": round(sum(1 for row in group if extract_owner_value(row, "finetuned", "rule_passed")) / len(group), 4)},
         }
-
     return {
         "num_samples": len(rows),
         "win_counts": win_counts,
-        "win_rate_excluding_ties": {
-            "baseline": round(win_counts["baseline"] / non_tie, 4) if non_tie else None,
-            "finetuned": round(win_counts["finetuned"] / non_tie, 4) if non_tie else None,
-        },
-        "task_completion_rate": {
-            "baseline": rate("baseline", "task_completed"),
-            "finetuned": rate("finetuned", "task_completed"),
-        },
-        "rule_pass_rate": {
-            "baseline": rate("baseline", "rule_passed"),
-            "finetuned": rate("finetuned", "rule_passed"),
-        },
-        "avg_task_completion_score": {
-            "baseline": avg("baseline", "task_completion_score"),
-            "finetuned": avg("finetuned", "task_completion_score"),
-        },
-        "avg_politeness_score": {
-            "baseline": avg("baseline", "politeness_score"),
-            "finetuned": avg("finetuned", "politeness_score"),
-        },
+        "win_rate_excluding_ties": {"baseline": round(win_counts["baseline"] / non_tie, 4) if non_tie else None, "finetuned": round(win_counts["finetuned"] / non_tie, 4) if non_tie else None},
+        "task_completion_rate": {"baseline": rate("baseline", "task_completed"), "finetuned": rate("finetuned", "task_completed")},
+        "rule_pass_rate": {"baseline": rate("baseline", "rule_passed"), "finetuned": rate("finetuned", "rule_passed")},
+        "avg_task_completion_score": {"baseline": avg("baseline", "task_completion_score"), "finetuned": avg("finetuned", "task_completion_score")},
+        "avg_politeness_score": {"baseline": avg("baseline", "politeness_score"), "finetuned": avg("finetuned", "politeness_score")},
         "avg_confidence": round(statistics.mean(row["judge"]["confidence"] for row in rows), 4),
         "scenario_breakdown": scenario_breakdown,
     }
@@ -589,20 +400,18 @@ def build_badcases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         finetuned_badcase_tags = row["judge"]["badcase_tags_a"] if row["blind_assignment"]["response_a_owner"] == "finetuned" else row["judge"]["badcase_tags_b"]
         if row["winner"] == "finetuned" and finetuned_task_completed and finetuned_rule_passed and finetuned_politeness_score >= 4:
             continue
-        badcases.append(
-            {
-                "id": row["id"],
-                "scenario": row["scenario"],
-                "winner": row["winner"],
-                "baseline_target": row["baseline_target"],
-                "finetuned_target": row["finetuned_target"],
-                "finetuned_task_completed": finetuned_task_completed,
-                "finetuned_rule_passed": finetuned_rule_passed,
-                "finetuned_politeness_score": finetuned_politeness_score,
-                "finetuned_badcase_tags": finetuned_badcase_tags,
-                "judge_reason": row["judge"]["reason"],
-            }
-        )
+        badcases.append({
+            "id": row["id"],
+            "scenario": row["scenario"],
+            "winner": row["winner"],
+            "baseline_target": row["baseline_target"],
+            "finetuned_target": row["finetuned_target"],
+            "finetuned_task_completed": finetuned_task_completed,
+            "finetuned_rule_passed": finetuned_rule_passed,
+            "finetuned_politeness_score": finetuned_politeness_score,
+            "finetuned_badcase_tags": finetuned_badcase_tags,
+            "judge_reason": row["judge"]["reason"],
+        })
     return badcases
 
 
@@ -610,15 +419,12 @@ def main() -> int:
     args = parse_args()
     load_env_file(ENV_PATH)
     api_key = get_api_key()
-
     eval_rows = load_jsonl(Path(args.eval_set))
     if args.limit:
         eval_rows = eval_rows[: args.limit]
-
     output_dir = Path(args.output_dir)
     ensure_dir(output_dir)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-
     baseline_path = Path(args.baseline_file) if args.baseline_file else output_dir / "baseline_predictions.jsonl"
     finetuned_path = Path(args.finetuned_file) if args.finetuned_file else output_dir / "finetuned_predictions.jsonl"
     detail_path = output_dir / "pairwise_results.jsonl"
@@ -635,36 +441,16 @@ def main() -> int:
 
     if args.baseline_file is None:
         print("[stage] generating baseline predictions", flush=True)
-        generate_predictions(
-            model_name_or_path=args.baseline_model_name_or_path,
-            eval_rows=eval_rows,
-            output_path=baseline_path,
-            trust_remote_code=args.trust_remote_code,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.generation_temperature,
-            top_p=args.generation_top_p,
-        )
+        generate_predictions(args.baseline_model_name_or_path, eval_rows, baseline_path, args.trust_remote_code, args.max_new_tokens, args.generation_temperature, args.generation_top_p)
     if args.finetuned_file is None:
         print("[stage] generating finetuned predictions", flush=True)
         finetuned_model_name_or_path = args.finetuned_model_name_or_path or args.baseline_model_name_or_path
         adapter_path = None if args.finetuned_model_name_or_path else args.finetuned_adapter_path
-        generate_predictions(
-            model_name_or_path=finetuned_model_name_or_path,
-            eval_rows=eval_rows,
-            output_path=finetuned_path,
-            trust_remote_code=args.trust_remote_code,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.generation_temperature,
-            top_p=args.generation_top_p,
-            adapter_path=adapter_path,
-        )
+        generate_predictions(finetuned_model_name_or_path, eval_rows, finetuned_path, args.trust_remote_code, args.max_new_tokens, args.generation_temperature, args.generation_top_p, adapter_path)
 
     business_doc = read_doc(DOC_DIR / "业务分析文档.markdown")
-    baseline_rows = load_jsonl(baseline_path)
-    finetuned_rows = load_jsonl(finetuned_path)
-    baseline_by_id = index_by_id(baseline_rows, "baseline file")
-    finetuned_by_id = index_by_id(finetuned_rows, "finetuned file")
-
+    baseline_by_id = index_by_id(load_jsonl(baseline_path), "baseline file")
+    finetuned_by_id = index_by_id(load_jsonl(finetuned_path), "finetuned file")
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for index, eval_row in enumerate(eval_rows, start=1):
@@ -673,55 +459,28 @@ def main() -> int:
         baseline_row = baseline_by_id.get(row_id)
         finetuned_row = finetuned_by_id.get(row_id)
         if baseline_row is None or finetuned_row is None:
-            missing = []
-            if baseline_row is None:
-                missing.append("baseline")
-            if finetuned_row is None:
-                missing.append("finetuned")
-            errors.append({"id": row_id, "error": f"missing_predictions:{','.join(missing)}"})
-            print(f"[judge {index}/{len(eval_rows)}] {row_id} -> missing {','.join(missing)}", flush=True)
+            errors.append({"id": row_id, "error": "missing_predictions"})
             continue
-
         try:
             baseline_text = extract_candidate_text(baseline_row)
             finetuned_text = extract_candidate_text(finetuned_row)
             response_a_owner, response_b_owner = choose_blind_order(row_id)
             response_a = baseline_text if response_a_owner == "baseline" else finetuned_text
             response_b = baseline_text if response_b_owner == "baseline" else finetuned_text
-            judge_raw = call_chat_completions(
-                api_key=api_key,
-                base_url=args.base_url,
-                model=args.judge_model,
-                messages=build_judge_messages(business_doc, eval_row, response_a, response_b),
-                temperature=args.temperature,
-                max_tokens=args.max_tokens,
-                timeout=args.timeout,
-            )
-            judge = normalize_judge_result(json.loads(judge_raw))
+            judge = normalize_judge_result(json.loads(call_chat_completions(api_key, args.base_url, args.judge_model, build_judge_messages(business_doc, eval_row, response_a, response_b), args.temperature, args.max_tokens, args.timeout)))
         except Exception as exc:  # noqa: BLE001
-            errors.append({"id": row_id, "error": f"judge_error: {exc}"})
-            print(f"[judge {index}/{len(eval_rows)}] {row_id} -> judge error: {exc}", flush=True)
+            errors.append({"id": row_id, "error": str(exc)})
         else:
-            winner = resolve_winner(judge["winner"], response_a_owner, response_b_owner)
-            result_row = {
+            results.append({
                 "id": row_id,
                 "scenario": scenario,
                 "baseline_target": baseline_text,
                 "finetuned_target": finetuned_text,
-                "blind_assignment": {
-                    "response_a_owner": response_a_owner,
-                    "response_b_owner": response_b_owner,
-                },
+                "blind_assignment": {"response_a_owner": response_a_owner, "response_b_owner": response_b_owner},
                 "judge": judge,
-                "winner": winner,
-            }
-            results.append(result_row)
-            print(
-                f"[judge {index}/{len(eval_rows)}] {row_id} -> winner={winner}"
-                f" | baseline_rule={extract_owner_value(result_row, 'baseline', 'rule_passed')}"
-                f" | finetuned_rule={extract_owner_value(result_row, 'finetuned', 'rule_passed')}",
-                flush=True,
-            )
+                "winner": resolve_winner(judge["winner"], response_a_owner, response_b_owner),
+            })
+            print(f"[judge {index}/{len(eval_rows)}] {row_id}", flush=True)
         if index < len(eval_rows):
             time.sleep(args.sleep_seconds)
 
@@ -741,15 +500,9 @@ def main() -> int:
         "aggregate": build_summary(results),
         "errors": errors,
     }
-
     write_jsonl(detail_path, results)
     write_json(summary_path, summary)
     write_jsonl(badcase_path, badcases)
-
-    print("\nDone.")
-    print(f"Baseline predictions: {baseline_path}")
-    print(f"Finetuned predictions: {finetuned_path}")
-    print(f"Details: {detail_path}")
     print(f"Summary: {summary_path}")
     print(f"Badcases: {badcase_path}")
     return 0 if not errors else 1
