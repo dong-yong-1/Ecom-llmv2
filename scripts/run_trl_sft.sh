@@ -2,12 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_PYTHON="$ROOT_DIR/.venv/bin/python"
-if [[ -x "$DEFAULT_PYTHON" ]]; then
-  PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
-else
-  PYTHON_BIN="${PYTHON_BIN:-python3}"
-fi
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 TRAIN_JSONL="${TRAIN_JSONL:-$ROOT_DIR/data/golden_v1_train.jsonl}"
 TRL_DATA_DIR="${TRL_DATA_DIR:-$ROOT_DIR/data/trl_sft}"
 TRAIN_FILE="${TRAIN_FILE:-$TRL_DATA_DIR/train.jsonl}"
