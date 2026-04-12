@@ -15,7 +15,7 @@
 - `scripts/run_trl_lora_ablation.py`
 - `scripts/run_trl_lora_ablation_autodl.sh`
 - `scripts/generate_eval_predictions.py`
-- `scripts/setup_uv_env_autodl.sh`
+- `scripts/setup_pip_env_autodl.sh`
 - `requirements-train.txt`
 - `.gitignore`
 - `doc/TRL_SFT与LoRA消融说明v1.markdown`
@@ -67,10 +67,12 @@ git clone https://github.com/dong-yong-1/Ecom-llmv2.git
 cd Ecom-llmv2
 ```
 
-## 3. 在 AutoDL 上建立 uv 环境
+## 3. 在 AutoDL 上建立 pip 环境
+
+按你的要求，AutoDL 上不要用 `uv`，直接用 `pip` 安装。
 
 ```bash
-bash scripts/setup_uv_env_autodl.sh
+bash scripts/setup_pip_env_autodl.sh
 source .venv/bin/activate
 ```
 

@@ -1,0 +1,9 @@
+accelerate==1.13.0
+datasets==4.8.4
+pandas==3.0.2
+peft==0.18.1
+pyarrow==23.0.1
+safetensors>=0.7.0
+sentencepiece>=0.2.0
+transformers==5.5.3
+trl==1.1.0

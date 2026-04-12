@@ -201,3 +201,26 @@ python /Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/run_trl_lora_ablatio
 2. 先跑单次 TRL SFT
 3. 再跑第一轮 9 组 LoRA 消融
 4. 最后接现有 pairwise 评测脚本看微调胜率
+
+
+## 9. AutoDL 环境建议
+
+如果你在 AutoDL 上训练，建议直接使用 `pip` 建环境，不用 `uv`。
+
+推荐脚本：
+
+`/Users/dongyong/Project/Trea_code/ecom-llmv2/scripts/setup_pip_env_autodl.sh`
+
+最小用法：
+
+```bash
+bash scripts/setup_pip_env_autodl.sh
+source .venv/bin/activate
+```
+
+如果你的 AutoDL 镜像 CUDA 版本不是 `cu121`，可以覆盖：
+
+```bash
+export TORCH_INDEX_URL=https://download.pytorch.org/whl/cu118
+bash scripts/setup_pip_env_autodl.sh
+```
