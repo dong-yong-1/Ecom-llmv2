@@ -6,14 +6,9 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
 INSTALL_TORCH="${INSTALL_TORCH:-true}"
 RECREATE_VENV="${RECREATE_VENV:-false}"
-TORCH_BACKEND="${TORCH_BACKEND:-cu121}"
-TORCH_VERSION="${TORCH_VERSION:-2.5.1}"
-TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.20.1}"
-TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.5.1}"
 
 if ! command -v uv >/dev/null 2>&1; then
-  echo "[error] uv is not installed. Please install uv first on AutoDL." >&2
-  echo "[hint] curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  echo "[error] uv is not installed. Please install uv first." >&2
   exit 1
 fi
 
@@ -32,29 +27,8 @@ echo "[info] Installing base training dependencies"
 uv pip install --python "$VENV_DIR/bin/python" -r "$ROOT_DIR/requirements-train.txt"
 
 if [[ "$INSTALL_TORCH" == "true" ]]; then
-  case "$TORCH_BACKEND" in
-    cu121)
-      TORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
-      ;;
-    cu118)
-      TORCH_INDEX_URL="https://download.pytorch.org/whl/cu118"
-      ;;
-    cpu)
-      TORCH_INDEX_URL="https://download.pytorch.org/whl/cpu"
-      ;;
-    *)
-      echo "[error] Unsupported TORCH_BACKEND: $TORCH_BACKEND" >&2
-      echo "[hint] Use one of: cu121, cu118, cpu" >&2
-      exit 1
-      ;;
-  esac
-
-  echo "[info] Installing torch stack for backend=$TORCH_BACKEND from $TORCH_INDEX_URL"
-  uv pip install --python "$VENV_DIR/bin/python" \
-    "torch==${TORCH_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}" \
-    "torchaudio==${TORCHAUDIO_VERSION}" \
-    --index-url "$TORCH_INDEX_URL"
+  echo "[info] Installing local torch stack for macOS / CPU / MPS"
+  uv pip install --python "$VENV_DIR/bin/python" torch torchvision torchaudio
 else
   echo "[info] Skipping torch installation (INSTALL_TORCH=false)"
 fi
@@ -67,8 +41,8 @@ try:
     import torch
     print("torch", torch.__version__)
     print("cuda_available", torch.cuda.is_available())
-    if torch.cuda.is_available():
-        print("device_count", torch.cuda.device_count())
+    mps_available = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+    print("mps_available", mps_available)
 except Exception as exc:
     print("torch_check_failed", repr(exc))
 PY

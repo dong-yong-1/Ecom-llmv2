@@ -2,7 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+DEFAULT_PYTHON="$ROOT_DIR/.venv/bin/python"
+if [[ -x "$DEFAULT_PYTHON" ]]; then
+  PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+else
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+fi
 TRAIN_JSONL="${TRAIN_JSONL:-$ROOT_DIR/data/golden_v1_train.jsonl}"
 TRL_DATA_DIR="${TRL_DATA_DIR:-$ROOT_DIR/data/trl_sft}"
 TRAIN_FILE="${TRAIN_FILE:-$TRL_DATA_DIR/train.jsonl}"
@@ -13,6 +18,7 @@ VAL_RATIO="${VAL_RATIO:-0.1}"
 MAX_LENGTH="${MAX_LENGTH:-1024}"
 LEARNING_RATE="${LEARNING_RATE:-2e-4}"
 NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-3}"
+MAX_STEPS="${MAX_STEPS:--1}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-2}"
 PER_DEVICE_EVAL_BATCH_SIZE="${PER_DEVICE_EVAL_BATCH_SIZE:-2}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-8}"
@@ -63,6 +69,7 @@ CMD=(
   --max-length "$MAX_LENGTH"
   --learning-rate "$LEARNING_RATE"
   --num-train-epochs "$NUM_TRAIN_EPOCHS"
+  --max-steps "$MAX_STEPS"
   --per-device-train-batch-size "$PER_DEVICE_TRAIN_BATCH_SIZE"
   --per-device-eval-batch-size "$PER_DEVICE_EVAL_BATCH_SIZE"
   --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS"

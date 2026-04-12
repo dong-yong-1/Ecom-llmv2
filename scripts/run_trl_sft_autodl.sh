@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck disable=SC1090
-source "$ROOT_DIR/.venv/bin/activate"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" )/.." && pwd)"
+DEFAULT_PYTHON="$ROOT_DIR/.venv/bin/python"
+if [[ -x "$DEFAULT_PYTHON" ]]; then
+  PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+else
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+fi
 
+export PYTHON_BIN
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 export NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-3}"
 export PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-2}"

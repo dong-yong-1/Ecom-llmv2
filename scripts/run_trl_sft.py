@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import torch
 from datasets import load_dataset
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -28,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=1024, help="Max sequence length.")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate.")
     parser.add_argument("--num-train-epochs", type=float, default=3.0, help="Train epochs.")
+    parser.add_argument("--max-steps", type=int, default=-1, help="Override total train steps, -1 means disabled.")
     parser.add_argument("--per-device-train-batch-size", type=int, default=2, help="Train batch size per device.")
     parser.add_argument("--per-device-eval-batch-size", type=int, default=2, help="Eval batch size per device.")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8, help="Grad accumulation.")
@@ -84,10 +86,43 @@ def load_local_json_dataset(train_file: str, eval_file: str | None) -> tuple[Any
     return train_dataset, eval_dataset
 
 
+def detect_device_backend() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def render_messages(messages: list[dict[str, str]]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        parts.append(f"<|{role}|>\n{content}".strip())
+    return "\n\n".join(parts)
+
+
+def maybe_prepare_text_dataset(train_dataset: Any, eval_dataset: Any | None, tokenizer: Any) -> tuple[Any, Any | None, str | None, bool]:
+    if getattr(tokenizer, "chat_template", None):
+        return train_dataset, eval_dataset, None, True
+
+    def add_text(row: dict[str, Any]) -> dict[str, str]:
+        prompt = render_messages(row["prompt"])
+        completion = render_messages(row["completion"])
+        return {"text": f"{prompt}\n\n{completion}"}
+
+    train_dataset = train_dataset.map(add_text, remove_columns=train_dataset.column_names)
+    if eval_dataset is not None:
+        eval_dataset = eval_dataset.map(add_text, remove_columns=eval_dataset.column_names)
+    return train_dataset, eval_dataset, "text", False
+
+
 def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    device_backend = detect_device_backend()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token is None:
@@ -99,6 +134,11 @@ def main() -> int:
     )
 
     train_dataset, eval_dataset = load_local_json_dataset(args.train_file, args.eval_file if args.eval_strategy != "no" else None)
+    train_dataset, eval_dataset, dataset_text_field, completion_only_loss = maybe_prepare_text_dataset(
+        train_dataset,
+        eval_dataset,
+        tokenizer,
+    )
 
     peft_config = None
     if args.use_lora:
@@ -126,6 +166,7 @@ def main() -> int:
         max_length=args.max_length,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
+        max_steps=args.max_steps,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -141,8 +182,9 @@ def main() -> int:
         gradient_checkpointing=gradient_checkpointing,
         report_to=report_to,
         seed=args.seed,
+        dataset_text_field=dataset_text_field or "text",
         dataset_kwargs={"skip_prepare_dataset": False},
-        completion_only_loss=True,
+        completion_only_loss=completion_only_loss,
         assistant_only_loss=False,
         dataset_num_proc=1,
     )
@@ -167,9 +209,12 @@ def main() -> int:
 
     summary = {
         "model_name_or_path": args.model_name_or_path,
+        "device_backend": device_backend,
         "train_file": str(Path(args.train_file).resolve()),
         "eval_file": str(Path(args.eval_file).resolve()) if args.eval_file else None,
         "output_dir": str(output_dir.resolve()),
+        "uses_chat_template": bool(getattr(tokenizer, "chat_template", None)),
+        "dataset_text_field": dataset_text_field,
         "use_lora": args.use_lora,
         "lora_r": args.lora_r if args.use_lora else None,
         "lora_alpha": args.lora_alpha if args.use_lora else None,
