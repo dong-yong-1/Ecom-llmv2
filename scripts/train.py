@@ -91,6 +91,20 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def parse_input_files(value: str) -> list[Path]:
+    files: list[Path] = []
+    for part in value.split(","):
+        candidate = Path(part.strip())
+        if not part.strip():
+            continue
+        if not candidate.is_absolute():
+            candidate = (ROOT / candidate).resolve()
+        files.append(candidate)
+    if not files:
+        raise ValueError("At least one input file is required.")
+    return files
+
+
 def stable_bucket(row_id: str) -> str:
     return hashlib.md5(row_id.encode("utf-8")).hexdigest()
 
@@ -181,9 +195,23 @@ def write_jsonl(rows: list[dict[str, Any]], path: Path) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def prepare_dataset(input_file: Path, data_dir: Path, val_ratio: float) -> tuple[Path, Path, dict[str, Any]]:
+def prepare_dataset(input_spec: str, data_dir: Path, val_ratio: float) -> tuple[Path, Path, dict[str, Any]]:
     data_dir.mkdir(parents=True, exist_ok=True)
-    raw_rows = load_jsonl(input_file)
+    input_files = parse_input_files(input_spec)
+    raw_rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    duplicate_ids: list[str] = []
+    for input_file in input_files:
+        current_rows = load_jsonl(input_file)
+        for row in current_rows:
+            row_id = row.get("id")
+            if row_id in seen_ids:
+                duplicate_ids.append(str(row_id))
+                continue
+            seen_ids.add(str(row_id))
+            raw_rows.append(row)
+    if duplicate_ids:
+        raise ValueError(f"Duplicate row ids found across input files: {sorted(set(duplicate_ids))[:10]}")
     normalized_rows = [normalize_row(row) for row in raw_rows]
     train_rows, val_rows = stratified_split(normalized_rows, val_ratio)
 
@@ -193,7 +221,8 @@ def prepare_dataset(input_file: Path, data_dir: Path, val_ratio: float) -> tuple
     write_jsonl(val_rows, val_path)
 
     summary = {
-        "input": str(input_file.resolve()),
+        "input": input_spec,
+        "input_files": [str(path) for path in input_files],
         "output_dir": str(data_dir.resolve()),
         "num_total": len(normalized_rows),
         "num_train": len(train_rows),
