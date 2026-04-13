@@ -7,6 +7,7 @@ import argparse
 import gc
 import hashlib
 import json
+import os
 import statistics
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,9 @@ def parse_args() -> argparse.Namespace:
         help="LoRA target modules alias or comma-separated explicit module names for single mode.",
     )
     parser.add_argument("--report-to", default="none", help="Transformers report_to setting.")
+    parser.add_argument("--run-name", default=None, help="Optional run name for trainer / wandb.")
+    parser.add_argument("--wandb-project", default=None, help="Optional wandb project name.")
+    parser.add_argument("--wandb-entity", default=None, help="Optional wandb entity/team.")
     parser.add_argument("--resume-from-checkpoint", default=None, help="Optional checkpoint path.")
     return parser.parse_args()
 
@@ -291,6 +295,103 @@ def cleanup_memory() -> None:
         torch.cuda.empty_cache()
 
 
+def save_training_artifacts(output_dir: Path, trainer: Any) -> dict[str, Any]:
+    log_history = list(getattr(trainer.state, "log_history", []) or [])
+    (output_dir / "log_history.json").write_text(
+        json.dumps(log_history, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    train_points: list[dict[str, Any]] = []
+    eval_points: list[dict[str, Any]] = []
+    learning_rate_points: list[dict[str, Any]] = []
+    for entry in log_history:
+        step = entry.get("step")
+        epoch = entry.get("epoch")
+        if "loss" in entry:
+            train_points.append({"step": step, "epoch": epoch, "loss": entry.get("loss")})
+        if "eval_loss" in entry:
+            eval_points.append({"step": step, "epoch": epoch, "eval_loss": entry.get("eval_loss")})
+        if "learning_rate" in entry:
+            learning_rate_points.append({"step": step, "epoch": epoch, "learning_rate": entry.get("learning_rate")})
+
+    curves = {
+        "train_loss": train_points,
+        "eval_loss": eval_points,
+        "learning_rate": learning_rate_points,
+    }
+    (output_dir / "curves.json").write_text(
+        json.dumps(curves, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    csv_lines = ["step,epoch,train_loss,eval_loss,learning_rate"]
+    merged_by_step: dict[Any, dict[str, Any]] = {}
+    for point in train_points:
+        merged_by_step.setdefault(point["step"], {}).update(point)
+    for point in eval_points:
+        merged_by_step.setdefault(point["step"], {}).update(point)
+    for point in learning_rate_points:
+        merged_by_step.setdefault(point["step"], {}).update(point)
+    for step in sorted(merged_by_step, key=lambda value: (-1 if value is None else value)):
+        row = merged_by_step[step]
+        csv_lines.append(
+            ",".join(
+                [
+                    str("" if row.get("step") is None else row.get("step")),
+                    str("" if row.get("epoch") is None else row.get("epoch")),
+                    str("" if row.get("loss") is None else row.get("loss")),
+                    str("" if row.get("eval_loss") is None else row.get("eval_loss")),
+                    str("" if row.get("learning_rate") is None else row.get("learning_rate")),
+                ]
+            )
+        )
+    (output_dir / "curves.csv").write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+
+    plot_created = False
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+
+        if train_points or eval_points:
+            fig, ax = plt.subplots(figsize=(8, 5))
+            if train_points:
+                ax.plot(
+                    [point["step"] for point in train_points],
+                    [point["loss"] for point in train_points],
+                    label="train_loss",
+                    linewidth=2,
+                )
+            if eval_points:
+                ax.plot(
+                    [point["step"] for point in eval_points],
+                    [point["eval_loss"] for point in eval_points],
+                    label="eval_loss",
+                    linewidth=2,
+                )
+            ax.set_xlabel("step")
+            ax.set_ylabel("loss")
+            ax.set_title("Training Loss Curve")
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(output_dir / "loss_curve.png", dpi=150)
+            plt.close(fig)
+            plot_created = True
+    except Exception:
+        plot_created = False
+
+    return {
+        "num_log_entries": len(log_history),
+        "num_train_loss_points": len(train_points),
+        "num_eval_loss_points": len(eval_points),
+        "loss_curve_png_created": plot_created,
+        "log_history_file": str((output_dir / "log_history.json").resolve()),
+        "curves_json_file": str((output_dir / "curves.json").resolve()),
+        "curves_csv_file": str((output_dir / "curves.csv").resolve()),
+        "loss_curve_png_file": str((output_dir / "loss_curve.png").resolve()) if plot_created else None,
+    }
+
+
 def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | None, output_dir: Path, lora_r: int | None = None, target_modules: str | None = None) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     device_backend = detect_device_backend()
@@ -328,9 +429,18 @@ def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | 
     else:
         report_to = [args.report_to]
 
+    run_name = args.run_name or output_dir.name
+    if "wandb" in report_to:
+        if args.wandb_project:
+            os.environ["WANDB_PROJECT"] = args.wandb_project
+        if args.wandb_entity:
+            os.environ["WANDB_ENTITY"] = args.wandb_entity
+        os.environ.setdefault("WANDB_WATCH", "false")
+
     gradient_checkpointing = args.gradient_checkpointing and not args.no_gradient_checkpointing
     sft_config = SFTConfig(
         output_dir=str(output_dir),
+        run_name=run_name,
         max_length=args.max_length,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
@@ -373,6 +483,7 @@ def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | 
     if eval_dataset is not None and args.eval_strategy != "no":
         eval_metrics = trainer.evaluate()
         metrics.update({f"final_{k}": v for k, v in eval_metrics.items()})
+    artifact_summary = save_training_artifacts(output_dir, trainer)
 
     summary = {
         "model_name_or_path": args.model_name_or_path,
@@ -380,6 +491,7 @@ def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | 
         "train_file": str(train_file.resolve()),
         "eval_file": str(eval_file.resolve()) if eval_file else None,
         "output_dir": str(output_dir.resolve()),
+        "run_name": run_name,
         "uses_chat_template": bool(getattr(tokenizer, "chat_template", None)),
         "dataset_text_field": dataset_text_field,
         "use_lora": args.use_lora,
@@ -387,6 +499,7 @@ def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | 
         "lora_alpha": args.lora_alpha if args.use_lora else None,
         "target_modules": resolve_target_modules(effective_target_modules) if args.use_lora else None,
         "metrics": metrics,
+        "artifacts": artifact_summary,
     }
     (output_dir / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
