@@ -8,6 +8,7 @@ import gc
 import hashlib
 import json
 import os
+import random
 import statistics
 import sys
 import time
@@ -44,6 +45,7 @@ BOOL_FIELDS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified evaluation script.")
+    parser.add_argument("--mode", choices=["formal", "explore"], default="formal", help="Evaluation mode. Use formal for fixed, reproducible comparison.")
     parser.add_argument("--eval-set", default=str(DEFAULT_EVAL_SET), help="Golden eval set JSONL path.")
     parser.add_argument("--baseline-model-name-or-path", required=True, help="Baseline/base model path or HF repo.")
     parser.add_argument("--finetuned-model-name-or-path", default=None, help="Optional merged fine-tuned model path.")
@@ -62,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generation-top-p", type=float, default=1.0, help="Generation top-p.")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--limit", type=int, default=None, help="Optional sample limit.")
+    parser.add_argument("--sample-seed", type=int, default=42, help="Sampling seed for explore mode.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output files.")
     return parser.parse_args()
 
@@ -105,6 +108,10 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def stable_hash(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -117,6 +124,61 @@ def write_json(path: Path, obj: dict[str, Any]) -> None:
 
 def read_doc(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def get_scenario(row: dict[str, Any]) -> str:
+    return row.get("annotation_meta", {}).get("scenario", "未知")
+
+
+def select_eval_rows(eval_rows: list[dict[str, Any]], limit: int | None, mode: str, sample_seed: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if limit is None or limit >= len(eval_rows):
+        return eval_rows, {
+            "selection_mode": "full",
+            "num_selected": len(eval_rows),
+            "selected_ids": [row["id"] for row in eval_rows],
+        }
+
+    if mode == "formal":
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for row in eval_rows:
+            groups.setdefault(get_scenario(row), []).append(row)
+        scenario_names = sorted(groups)
+        selected: list[dict[str, Any]] = []
+        remaining = limit
+        remaining_scenarios = len(scenario_names)
+
+        for scenario in scenario_names:
+            items = sorted(groups[scenario], key=lambda row: stable_hash(row["id"]))
+            take = min(len(items), max(1, remaining // remaining_scenarios))
+            selected.extend(items[:take])
+            remaining -= take
+            remaining_scenarios -= 1
+
+        if len(selected) < limit:
+            selected_ids = {row["id"] for row in selected}
+            leftovers = sorted(
+                [row for row in eval_rows if row["id"] not in selected_ids],
+                key=lambda row: stable_hash(row["id"]),
+            )
+            selected.extend(leftovers[: limit - len(selected)])
+
+        selected = sorted(selected[:limit], key=lambda row: stable_hash(row["id"]))
+        return selected, {
+            "selection_mode": "formal_stratified_fixed",
+            "num_selected": len(selected),
+            "selected_ids": [row["id"] for row in selected],
+        }
+
+    rng = random.Random(sample_seed)
+    selected = list(eval_rows)
+    rng.shuffle(selected)
+    selected = selected[:limit]
+    return selected, {
+        "selection_mode": "explore_random_seeded",
+        "sample_seed": sample_seed,
+        "num_selected": len(selected),
+        "selected_ids": [row["id"] for row in selected],
+    }
 
 
 def format_context(context: dict[str, Any]) -> str:
@@ -419,9 +481,14 @@ def main() -> int:
     args = parse_args()
     load_env_file(ENV_PATH)
     api_key = get_api_key()
-    eval_rows = load_jsonl(Path(args.eval_set))
-    if args.limit:
-        eval_rows = eval_rows[: args.limit]
+    eval_rows_all = load_jsonl(Path(args.eval_set))
+    eval_rows, selection_meta = select_eval_rows(eval_rows_all, args.limit, args.mode, args.sample_seed)
+
+    if args.mode == "formal":
+        args.temperature = 0.0
+        args.generation_temperature = 0.0
+        args.generation_top_p = 1.0
+
     output_dir = Path(args.output_dir)
     ensure_dir(output_dir)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -430,7 +497,8 @@ def main() -> int:
     detail_path = output_dir / "pairwise_results.jsonl"
     summary_path = output_dir / "pairwise_summary.json"
     badcase_path = output_dir / "badcases.jsonl"
-    if not args.overwrite:
+    selection_path = output_dir / "selected_eval_ids.json"
+    if not args.overwrite and args.mode != "formal":
         if args.baseline_file is None:
             baseline_path = output_dir / f"baseline_predictions_{timestamp}.jsonl"
         if args.finetuned_file is None:
@@ -438,6 +506,7 @@ def main() -> int:
         detail_path = output_dir / f"pairwise_results_{timestamp}.jsonl"
         summary_path = output_dir / f"pairwise_summary_{timestamp}.json"
         badcase_path = output_dir / f"badcases_{timestamp}.jsonl"
+        selection_path = output_dir / f"selected_eval_ids_{timestamp}.json"
 
     if args.baseline_file is None:
         print("[stage] generating baseline predictions", flush=True)
@@ -486,7 +555,16 @@ def main() -> int:
 
     badcases = build_badcases(results)
     summary = {
+        "mode": args.mode,
         "eval_set": str(Path(args.eval_set).resolve()),
+        "evaluation_protocol": {
+            "mode": args.mode,
+            "judge_temperature": args.temperature,
+            "generation_temperature": args.generation_temperature,
+            "generation_top_p": args.generation_top_p,
+            "max_new_tokens": args.max_new_tokens,
+            "selection": selection_meta,
+        },
         "baseline_model_name_or_path": args.baseline_model_name_or_path,
         "finetuned_model_name_or_path": args.finetuned_model_name_or_path or args.baseline_model_name_or_path,
         "finetuned_adapter_path": None if args.finetuned_model_name_or_path else (str(Path(args.finetuned_adapter_path).resolve()) if args.finetuned_adapter_path else None),
@@ -503,8 +581,10 @@ def main() -> int:
     write_jsonl(detail_path, results)
     write_json(summary_path, summary)
     write_jsonl(badcase_path, badcases)
+    write_json(selection_path, selection_meta)
     print(f"Summary: {summary_path}")
     print(f"Badcases: {badcase_path}")
+    print(f"Selected eval ids: {selection_path}")
     return 0 if not errors else 1
 
 
