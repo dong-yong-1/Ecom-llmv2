@@ -442,13 +442,13 @@ def run_ablation(args: argparse.Namespace, *, train_file: Path, eval_file: Path)
 
 def main() -> int:
     args = parse_args()
-    input_file = Path(args.input_file)
+    input_spec = args.input_file
     data_dir = Path(args.data_dir)
     train_file = Path(args.train_file) if args.train_file else data_dir / "train.jsonl"
     eval_file = Path(args.eval_file) if args.eval_file else data_dir / "val.jsonl"
 
     if args.train_file is None or args.eval_file is None:
-        prepared_train, prepared_eval, _ = prepare_dataset(input_file, data_dir, args.val_ratio)
+        prepared_train, prepared_eval, _ = prepare_dataset(input_spec, data_dir, args.val_ratio)
         if args.train_file is None:
             train_file = prepared_train
         if args.eval_file is None:
