@@ -1,0 +1,20 @@
+{
+  "merge_strategy": "cumulative",
+  "sources": [
+    "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_train.jsonl",
+    "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/focus_fix_v1/generated.jsonl",
+    "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/balanced_fix_v1/generated.jsonl"
+  ],
+  "merged_output": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/balanced_fix_v1/merged.jsonl",
+  "merged_count": 160,
+  "scenario_counts": {
+    "取消订单": 35,
+    "修改地址": 32,
+    "催发货": 33,
+    "查询物流进度": 13,
+    "物流异常": 10,
+    "退款流程说明": 11,
+    "退货条件判断": 22,
+    "转人工": 4
+  }
+}

@@ -25,11 +25,14 @@ DEFAULT_MERGED_OUTPUT = DEFAULT_RUN_DIR / "merged.jsonl"
 DEFAULT_SUMMARY_OUTPUT = DEFAULT_RUN_DIR / "summary.json"
 DEFAULT_MODEL = "deepseek-chat"
 
-TARGET_SCENARIOS = {"催发货", "取消订单", "修改地址"}
+TARGET_SCENARIOS = {"催发货", "取消订单", "修改地址", "退货条件判断", "查询物流进度", "退款流程说明"}
 SCENARIO_PREFIX = {
     "催发货": "urge",
     "取消订单": "cancel",
     "修改地址": "change",
+    "退货条件判断": "return",
+    "查询物流进度": "logistics",
+    "退款流程说明": "refund",
 }
 
 
@@ -59,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenarios",
-        default="催发货,取消订单,修改地址",
+        default="催发货,取消订单,修改地址,退货条件判断,查询物流进度,退款流程说明",
         help="Comma-separated scenarios to augment.",
     )
     parser.add_argument("--max-seeds", type=int, default=12, help="Max seed rows to use.")
@@ -147,9 +150,12 @@ def build_policy_block() -> str:
         "1. 取消订单：未发货可取消；已发货不可取消，必须引导用户收到货后申请退货退款；状态未知先追问。\n"
         "2. 催发货：只能查询、解释、反馈催促，不能承诺发货时间、不能保证已加急；信息不足时先追问订单号或手机号尾号。\n"
         "3. 修改地址：未发货可修改地址；已发货或已揽收不可直接修改，必须引导用户自行联系承运物流尝试协调。\n"
-        "4. 不编造订单状态、物流状态、处理结果、售后结果，也不要增加规则里没有的流程。\n"
-        "5. 输出必须是 schema_v1 的单条 JSON 对象；可以写短多轮对话历史，但 target 只能是当前轮客服回复。\n"
-        "6. 优先生成能修复 badcase 的 hardcase：边界条件、口语化表达、焦虑情绪、追问后承接。\n"
+        "4. 退货条件判断：要优先围绕是否签收、是否拆封、是否有质量问题来判断；拆封后无质量问题不支持售后，拆封后有质量问题可走质量问题售后。\n"
+        "5. 查询物流进度：运输中只能说明当前物流状态并建议关注物流更新，不能编造具体到货时间，也不能承诺主动通知。\n"
+        "6. 退款流程说明：信息不足时优先追问是否签收、是否有质量问题；不要编造已签收、质量问题成立等状态。\n"
+        "7. 不编造订单状态、物流状态、处理结果、售后结果，也不要增加规则里没有的流程。\n"
+        "8. 输出必须是 schema_v1 的单条 JSON 对象；可以写短多轮对话历史，但 target 只能是当前轮客服回复。\n"
+        "9. 优先生成能修复 badcase 的 hardcase：边界条件、口语化表达、焦虑情绪、追问后承接。\n"
     )
 
 
@@ -251,6 +257,33 @@ def validate_generated_row(row: dict[str, Any]) -> None:
                 raise ValueError("Shipped address change case should guide contacting logistics")
             if "联系卖家" in target or "联系寄件人" in target:
                 raise ValueError("Shipped address change case should not guide seller/sender")
+
+    if scenario == "退货条件判断":
+        is_signed = context.get("is_signed")
+        is_opened = context.get("is_opened")
+        has_quality_issue = context.get("has_quality_issue")
+        if "未知" in {is_signed, is_opened, has_quality_issue}:
+            required = ["签收", "拆封", "质量"]
+            if not all(keyword in target for keyword in required):
+                raise ValueError("Return judgment with unknown slots should ask signed/opened/quality issue")
+        if is_opened == "是" and has_quality_issue == "否" and ("不支持" not in target and "不能" not in target):
+            raise ValueError("Opened and no-quality case should not support return")
+        if is_opened == "是" and has_quality_issue == "是" and "质量问题" not in target:
+            raise ValueError("Opened and quality issue case should guide quality-issue aftersales")
+
+    if scenario == "查询物流进度":
+        if context.get("logistics_status") == "运输中":
+            forbidden_time_words = ["2-3天", "3天内", "明天", "今天内", "今晚", "小时内", "预计"]
+            if any(word in target for word in forbidden_time_words):
+                raise ValueError("Transit logistics case should not promise a delivery time")
+
+    if scenario == "退款流程说明":
+        is_signed = context.get("is_signed")
+        has_quality_issue = context.get("has_quality_issue")
+        if "未知" in {is_signed, has_quality_issue}:
+            required = ["签收", "质量"]
+            if not all(keyword in target for keyword in required):
+                raise ValueError("Refund guidance with unknown slots should ask signed/quality issue")
 
 
 def make_chat_request(

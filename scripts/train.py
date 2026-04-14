@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-total-limit", type=int, default=2, help="Max checkpoints to keep.")
     parser.add_argument("--eval-strategy", choices=["no", "steps", "epoch"], default="steps")
     parser.add_argument("--save-strategy", choices=["steps", "epoch", "no"], default="steps")
+    parser.add_argument("--dataset-num-proc", type=int, default=0, help="Dataset preprocessing workers. Use 0 for single-process.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--bf16", action="store_true")
@@ -438,6 +439,7 @@ def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | 
         os.environ.setdefault("WANDB_WATCH", "false")
 
     gradient_checkpointing = args.gradient_checkpointing and not args.no_gradient_checkpointing
+    dataset_num_proc = None if args.dataset_num_proc <= 0 else args.dataset_num_proc
     sft_config = SFTConfig(
         output_dir=str(output_dir),
         run_name=run_name,
@@ -464,7 +466,7 @@ def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | 
         dataset_kwargs={"skip_prepare_dataset": False},
         completion_only_loss=completion_only_loss,
         assistant_only_loss=False,
-        dataset_num_proc=1,
+        dataset_num_proc=dataset_num_proc,
     )
 
     trainer = SFTTrainer(
@@ -498,6 +500,7 @@ def train_once(args: argparse.Namespace, *, train_file: Path, eval_file: Path | 
         "lora_r": effective_lora_r if args.use_lora else None,
         "lora_alpha": args.lora_alpha if args.use_lora else None,
         "target_modules": resolve_target_modules(effective_target_modules) if args.use_lora else None,
+        "dataset_num_proc": dataset_num_proc,
         "metrics": metrics,
         "artifacts": artifact_summary,
     }
