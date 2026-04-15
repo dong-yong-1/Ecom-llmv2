@@ -1,0 +1,33 @@
+{
+  "model": "deepseek-chat",
+  "review_model": "deepseek-chat",
+  "counts_request": {
+    "催发货": 8,
+    "取消订单": 8,
+    "修改地址": 8,
+    "查询物流进度": 8,
+    "退款流程说明": 8,
+    "退货条件判断": 8
+  },
+  "accepted_count": 48,
+  "rejected_count": 0,
+  "scenario_counts": {
+    "退货条件判断": 8,
+    "催发货": 8,
+    "退款流程说明": 8,
+    "查询物流进度": 8,
+    "修改地址": 8,
+    "取消订单": 8
+  },
+  "turn_style_counts": {
+    "single_turn": 30,
+    "multi_turn": 18
+  },
+  "output_file": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/eval_generation/holdout_v3_48/generated_eval.jsonl",
+  "rejected_file": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/eval_generation/holdout_v3_48/rejected_eval.jsonl",
+  "reference_files": [
+    "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_train.jsonl",
+    "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v1_eval.jsonl",
+    "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/golden_v2_holdout_eval.jsonl"
+  ]
+}
