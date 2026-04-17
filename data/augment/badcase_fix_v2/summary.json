@@ -1,0 +1,18 @@
+{
+  "base_train_file": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/balanced_fix_v1/merged.jsonl",
+  "seed_file": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v2/seed.jsonl",
+  "run_dir": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v2",
+  "generated_output": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v2/generated.jsonl",
+  "merged_output": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v2/merged.jsonl",
+  "generated_count": 23,
+  "merged_count": 183,
+  "scenarios": [
+    "修改地址",
+    "催发货",
+    "取消订单",
+    "查询物流进度",
+    "退款流程说明",
+    "退货条件判断"
+  ],
+  "model": "deepseek-chat"
+}
