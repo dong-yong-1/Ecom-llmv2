@@ -1,0 +1,16 @@
+{
+  "base_train_file": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v2/merged.jsonl",
+  "source_generated_file": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v3/generated.jsonl",
+  "curation_strategy": "manual_keep_clean_samples_only",
+  "selected_ids": [
+    "aug_urge_dc0157c385",
+    "aug_logistics_76d0a2563c",
+    "aug_logistics_ff9ebe340c",
+    "aug_logistics_fc33340fa9",
+    "aug_refund_13044c2972"
+  ],
+  "generated_count": 5,
+  "merged_count": 188,
+  "generated_output": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v3_curated/generated.jsonl",
+  "merged_output": "/Users/dongyong/Project/Trea_code/ecom-llmv2/data/augment/badcase_fix_v3_curated/merged.jsonl"
+}
